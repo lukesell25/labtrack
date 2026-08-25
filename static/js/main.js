@@ -56,10 +56,13 @@ function showToast(event) {
   clearTimeout(showToast._t);
   hideNotePrompt();
 
+  const hint = document.getElementById("toast-hint");
+
   if (event.action === "error") {
     document.getElementById("toast-name").textContent = event.message || "Card not recognized";
     document.getElementById("toast-action").textContent = "";
     document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
+    hint.style.display = "none";
     toast.classList.add("is-error", "is-visible");
     showToast._t = setTimeout(() => toast.classList.remove("is-visible"), TOAST_VISIBLE_MS);
     return;
@@ -69,6 +72,7 @@ function showToast(event) {
   document.getElementById("toast-action").textContent =
     event.action === "in" ? "Checked in" : "Checked out";
   document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
+  hint.style.display = "block";
   toast.classList.add("is-visible");
 
   if (event.action === "out" && event.checkin_event_id) {

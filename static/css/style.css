@@ -316,6 +316,14 @@ body.kiosk:has(.toast.is-out.is-visible) {
   color: var(--danger);
 }
 
+.toast__hint {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  color: var(--text-low);
+  margin-top: 0.25rem;
+}
+
 .toast.is-error .toast__action {
   color: var(--danger);
 }
