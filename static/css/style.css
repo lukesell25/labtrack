@@ -292,6 +292,7 @@ body.kiosk:has(.toast.is-out.is-visible) {
 
 .toast.is-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .toast__name {
@@ -364,6 +365,11 @@ body.kiosk:has(.toast.is-out.is-visible) {
   background: var(--graphite-800);
   color: var(--text-mid);
   cursor: pointer;
+}
+
+.toast__note-btn:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--amber);
 }
 
 .toast__note-btn--save {

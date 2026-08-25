@@ -101,9 +101,22 @@ function showToast(event) {
       finish();
     };
 
+    const skipBtn = document.getElementById("note-skip");
+    const saveBtn = document.getElementById("note-save");
     document.getElementById("note-save").onclick = save;
     document.getElementById("note-skip").onclick = finish;
-    input.onkeydown = (e) => { if (e.key === "Enter") save(); };
+
+    input.onkeydown = (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); skipBtn.focus(); }
+    };
+    skipBtn.onkeydown = (e) => {
+      if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); saveBtn.focus(); }
+    };
+    saveBtn.onkeydown = (e) => {
+      if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); skipBtn.focus(); }
+    };
 
     showToast._noteTimeout = setTimeout(finish, NOTE_PROMPT_TIMEOUT_MS);
   } else {
