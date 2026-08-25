@@ -1,0 +1,14 @@
+// Allow the labtrack service user to access smart card readers via pcscd,
+// even though it runs as a systemd service rather than an interactive
+// login session. Without this, pcscd's default polkit policy (pcsc-lite
+// >= 2.0.1) rejects non-session clients with SCARD_W_SECURITY_VIOLATION
+// ("Access denied").
+polkit.addRule(function(action, subject) {
+    if (
+        (action.id == "org.debian.pcsc-lite.access_pcsc" ||
+         action.id == "org.debian.pcsc-lite.access_card") &&
+        subject.user == "admin"
+    ) {
+        return polkit.Result.YES;
+    }
+});

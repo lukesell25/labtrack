@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lab Status Board · Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="dashboard">
+
+  <header class="dash__header">
+    <div>
+      <div class="board__eyebrow">LAB STATUS BOARD</div>
+      <h1>Dashboard</h1>
+    </div>
+    <div class="dash__updated">Updated <span id="updated-at">--</span></div>
+  </header>
+
+  <section class="dash__section">
+    <h2>Current roster</h2>
+    <div class="dash__roster" id="dash-roster"></div>
+  </section>
+
+  <section class="dash__section">
+    <h2>Hours this week</h2>
+    <table class="dash__table" id="hours-table">
+      <thead><tr><th>Member</th><th>Hours</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="dash__section">
+    <h2>Recent activity</h2>
+    <table class="dash__table" id="events-table">
+      <thead><tr><th>Time</th><th>Member</th><th>Action</th><th>Note</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

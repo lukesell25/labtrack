@@ -1,0 +1,10 @@
+{
+  "_comment": "Edit this file any time to change what the screensaver cycles through. No restart needed - it's re-read each time the screensaver loads.",
+  "lab_name": "Lab Status Board",
+  "objectives": [
+    "Finalize Q3 experiment protocol",
+    "Calibrate sensor rig #2",
+    "Draft results for upcoming review",
+    "Onboard new simulation pipeline"
+  ]
+}

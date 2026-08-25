@@ -1,0 +1,16 @@
+[Unit]
+Description=LabTrack web app (timesheet + status board)
+After=network.target pcscd.service
+Wants=pcscd.service
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/labtrack
+Environment=PATH=/home/admin/labtrack/venv/bin
+ExecStart=/home/admin/labtrack/venv/bin/gunicorn -w 1 -b 127.0.0.1:5000 app:app
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

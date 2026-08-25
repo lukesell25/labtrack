@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lab Status Board</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="kiosk">
+
+  <div class="scanlines"></div>
+
+  <main class="board">
+    <header class="board__header">
+      <div class="board__eyebrow">LAB STATUS BOARD</div>
+      <div class="board__clock" id="clock">--:--:--</div>
+    </header>
+
+    <section class="objectives" id="objectives">
+      <div class="objectives__label">Current objectives</div>
+      <ul class="objectives__list" id="objectives-list"></ul>
+    </section>
+
+    <section class="media" id="media">
+      <video id="media-video" autoplay muted loop playsinline></video>
+      <div class="media__empty" id="media-empty">
+        Drop .mp4 files into <code>static/media/</code> to cycle simulations here.
+      </div>
+    </section>
+  </main>
+
+  <footer class="roster" id="roster">
+    <!-- populated by JS -->
+  </footer>
+
+  <div class="reading-overlay" id="reading-overlay">
+    <div class="reading-overlay__dot"></div>
+    <div class="reading-overlay__text">Reading card&hellip;</div>
+  </div>
+
+  <div class="toast" id="toast">
+    <div class="toast__name" id="toast-name"></div>
+    <div class="toast__action" id="toast-action"></div>
+    <div class="toast__time" id="toast-time"></div>
+    <div class="toast__note" id="toast-note">
+      <input type="text" id="note-input" class="toast__note-input"
+             placeholder="Add a note (optional) — e.g. at lunch, in room 204" maxlength="80" autocomplete="off">
+      <div class="toast__note-actions">
+        <button type="button" id="note-skip" class="toast__note-btn">Skip</button>
+        <button type="button" id="note-save" class="toast__note-btn toast__note-btn--save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

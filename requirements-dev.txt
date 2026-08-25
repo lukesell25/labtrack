@@ -1,0 +1,14 @@
+# For local development away from the Pi (e.g. Windows/WSL via Claude Code).
+# Excludes pyscard and python-pkcs11 - both are hardware-only packages that
+# talk to pcscd/opensc for the physical CAC reader, which doesn't exist off
+# the Pi. cac_reader.py degrades gracefully without them (see its
+# _PYSCARD_AVAILABLE check), so everything else - the Flask routes, the
+# dashboard, the kiosk display, the database logic - runs fine using just
+# this file. Use /api/manual-toggle to simulate a card tap while developing.
+#
+# Install with: pip install -r requirements-dev.txt
+# (On the Pi itself, use requirements.txt instead - it includes everything.)
+
+Flask==3.0.3
+gunicorn==22.0.0
+cryptography==42.0.8

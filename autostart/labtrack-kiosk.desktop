@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=LabTrack Kiosk
+Exec=/usr/bin/chromium --kiosk --noerrdialog --disable-session-crashed-bubble --disable-infobars --password-store=basic --check-for-update-interval=31536000 http://localhost:5000
+X-GNOME-Autostart-enabled=true
+
+# NOTE: this XDG autostart file only works on the older X11/LXDE desktop.
+# Current Raspberry Pi OS (Bookworm and later) defaults to the labwc
+# Wayland compositor, which does NOT read files in this directory.
+# setup.sh installs autostart/labwc-autostart instead, which is the
+# mechanism that actually runs on a stock current install. Only use this
+# file if you've specifically switched your Pi back to the X11 desktop.

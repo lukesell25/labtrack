@@ -1,0 +1,32 @@
+#!/bin/sh
+# ~/.config/labwc/autostart
+#
+# IMPORTANT: labwc invokes this file directly with `sh` (dash on Raspberry
+# Pi OS), ignoring any shebang line. So everything below must be POSIX sh
+# compatible - bash-only features (like /dev/tcp, used in an earlier
+# version of this script) will silently fail under dash and hang forever,
+# which is exactly what happened here once already. Stick to plain POSIX
+# constructs and external tools (curl) rather than bash builtins.
+
+# Wait for the LabTrack backend to actually be listening before launching
+# the browser - on boot, the desktop session can come up before the
+# labtrack systemd service has finished starting (especially over Wi-Fi,
+# where association itself takes a few seconds), which would otherwise
+# show a "connection refused" page instead of the kiosk display.
+while ! curl -s -o /dev/null http://localhost:5000; do
+  sleep 1
+done
+
+# --password-store=basic skips Chromium's OS-keyring integration for THIS
+# launch. /etc/chromium.d/99-labtrack-password-store (installed alongside
+# this file) applies the same flag to every launch of chromium, including
+# manual ones from a menu - see that file for why both exist.
+chromium \
+  --kiosk \
+  --noerrdialogs \
+  --disable-infobars \
+  --disable-session-crashed-bubble \
+  --password-store=basic \
+  --check-for-update-interval=31536000 \
+  --ozone-platform=wayland \
+  http://localhost:5000 &
