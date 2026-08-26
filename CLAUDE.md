@@ -48,11 +48,20 @@ the routes/UI directly.
 ### Kiosk slide rotation
 
 The media panel cycles one combined playlist built by `buildPlaylist()`:
-every objective as a text slide, then every file in `MEDIA_FILES` (a
-hardcoded array in `main.js` — there's no directory-listing endpoint, so
-filenames must be added there by hand after dropping them in
-`static/media/`). Text slides advance on a `SLIDE_MS` timer; videos advance
-on the `ended` event.
+every objective as a slide, then every file in `MEDIA_FILES` (a hardcoded
+array in `main.js` — there's no directory-listing endpoint, so filenames
+must be added there by hand after dropping them in `static/media/`). Slides
+advance on a `SLIDE_MS` timer; videos advance on the `ended` event.
+
+An objective in `config/objectives.json` is **either a plain string or
+`{text, image}`**, where `image` is a filename in `static/media/`;
+`normalizeObjective()` accepts both so hand-edited files that predate the
+image support keep working. A slide with a picture gets the `has-image`
+class, which switches it to a side-by-side layout — `setSlideImage()` only
+touches `src` when the filename actually changed, so an objective coming
+back around on the next rotation doesn't re-decode the same picture. A
+picture that fails to load drops back to a text-only slide (guarded on
+`activeType`, same stale-event reasoning as the video handlers).
 
 Three things here are easy to break:
 
@@ -111,20 +120,27 @@ Two rules that matter for anything new:
   guard, `innerHTML` rebuilds relayout the section 40x a minute forever.
   Any new polled section needs the same guard.
 - **Screensaver video must be H.264 (AVC) and no wider than 1920px.**
-  Confirmed from `chrome://gpu` on the deployed Pi: the only hardware decode
-  profiles are h264 baseline/main/high, 32x32 to 1920x1920. HEVC/VP9/AV1, or
-  anything above 1920px, falls back to software decode and will peg the CPU.
-  Note the kiosk panel is wider than that (3440x1440), so encode media to
-  1080p and let it scale up — do not encode at panel resolution.
+  Confirmed from `chrome://gpu` on the Pi: the only hardware decode profiles
+  are h264 baseline/main/high, 32x32 to 1920x1920. HEVC/VP9/AV1, or anything
+  above 1920px, falls back to software decode and will peg the CPU. 1080p
+  H.264 is both the panel's native resolution and inside that ceiling, so
+  encode to exactly that.
+- **Objective slide pictures render at most ~780px wide** (`.slide__image`
+  is capped at 45% of the slide's content box, which is ~1730px on a 1080p
+  panel). ~800px wide is the right size; anything larger is decoded and
+  scaled down for nothing.
 
-**The kiosk display is a 3440x1440 ultrawide** — ~4.9M pixels, about 2.4x a
-1080p panel. Every full-screen effect costs proportionally more here, which
-is why the full-screen blurred overlays hurt as much as they did. Assume any
-effect covering the whole screen is expensive on this hardware.
+**The production kiosk panel is a standard 1080p display** (~2.1M pixels).
+Development happens on a 3440x1440 ultrawide, so check layout changes at
+1920x1080 — that's the size that ships. A full-screen effect still costs a
+V3D-class GPU real time at either resolution; assume anything covering the
+whole screen is expensive.
 
-The GPU path was verified on the deployed Pi (V3D 4.2.14.0, Mesa 26.2.0,
-Chrome 151): Rasterization, Compositing, Canvas and Video Decode all report
-hardware accelerated. `autostart/labwc-autostart` passes
+The GPU path was verified on the Pi (V3D 4.2.14.0, Mesa 26.2.0, Chrome 151):
+Rasterization, Compositing, Canvas and Video Decode all report hardware
+accelerated. (That dump's "Display(s) Information" shows 3440x1440 because
+the Pi was on the dev monitor at the time — the driver findings hold
+regardless of which panel is attached.) `autostart/labwc-autostart` passes
 `--enable-gpu-rasterization`; it deliberately does *not* pass
 `--ignore-gpu-blocklist`, since the blocklist was shown not to be vetoing
 anything on this hardware. If the board ever looks sluggish again, re-check

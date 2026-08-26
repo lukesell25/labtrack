@@ -188,6 +188,7 @@ const VIDEO_ERROR_RETRY_MS = 3000;
 const videoEl = document.getElementById("media-video");
 const slideEl = document.getElementById("media-slide");
 const slideTextEl = document.getElementById("slide-text");
+const slideImageEl = document.getElementById("slide-image");
 const emptyEl = document.getElementById("media-empty");
 
 let objectives = [];
@@ -200,11 +201,33 @@ let rotationStarted = false;
 // check this before acting - otherwise a stale event cuts a text slide short.
 let activeType = null;
 
+// An objective is either a plain string or {text, image}, where image is a
+// filename in static/media/. Both forms are supported so config/objectives.json
+// stays hand-editable and old files keep working untouched.
+function normalizeObjective(entry) {
+  if (typeof entry === "string") return { text: entry, image: null };
+  return { text: entry.text || "", image: entry.image || null };
+}
+
 function buildPlaylist() {
   return [
-    ...objectives.map(text => ({ type: "objective", text })),
+    ...objectives.map(o => ({ type: "objective", text: o.text, image: o.image })),
     ...MEDIA_FILES.map(file => ({ type: "video", file })),
   ];
+}
+
+// Swapping the src re-decodes the picture, so leave it alone when the same
+// objective comes back around and the file hasn't changed.
+function setSlideImage(file) {
+  if (!file) {
+    slideEl.classList.remove("has-image");
+    return;
+  }
+  if (slideImageEl.dataset.file !== file) {
+    slideImageEl.dataset.file = file;
+    slideImageEl.src = `/static/media/${file}`;
+  }
+  slideEl.classList.add("has-image");
 }
 
 function showNextSlide() {
@@ -227,6 +250,7 @@ function showNextSlide() {
     videoEl.pause();  // stop decoding while a text slide is up
     videoEl.style.display = "none";
     if (slideTextEl.textContent !== item.text) slideTextEl.textContent = item.text;
+    setSlideImage(item.image);
     slideEl.style.display = "flex";
     rotationTimer = setTimeout(showNextSlide, SLIDE_MS);
     return;
@@ -265,6 +289,16 @@ videoEl.addEventListener("error", () => {
   rotationTimer = setTimeout(showNextSlide, VIDEO_ERROR_RETRY_MS);
 });
 
+// A missing or corrupt picture falls back to a text-only slide rather than
+// leaving a broken-image box on the board. dataset.file is cleared so the
+// next time this objective comes around it retries the load.
+slideImageEl.addEventListener("error", () => {
+  if (activeType !== "objective") return;
+  console.error("objective image failed to load:", slideImageEl.currentSrc);
+  slideImageEl.dataset.file = "";
+  slideEl.classList.remove("has-image");
+});
+
 async function loadObjectives() {
   try {
     const res = await fetch("/api/objectives");
@@ -272,7 +306,7 @@ async function loadObjectives() {
     const json = JSON.stringify(data.objectives);
     if (json === loadObjectives._last) return;
     loadObjectives._last = json;
-    objectives = data.objectives || [];
+    objectives = (data.objectives || []).map(normalizeObjective);
     // Only reached when objectives.json actually changed, so restarting the
     // rotation here costs nothing in the steady state.
     restartRotation();

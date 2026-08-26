@@ -167,10 +167,29 @@ fallback, but issuance details vary.
 
 ### 7. Add screensaver content
 
+The kiosk cycles one rotation: each objective as a full-screen slide, then
+each video.
+
 - Edit `config/objectives.json` any time — no restart needed, it's re-read
-  every 60 seconds by the kiosk page.
+  every 60 seconds by the kiosk page. Each objective is either a plain
+  string, or an object with a picture beside the text:
+
+  ```json
+  "objectives": [
+    "Finalize Q3 experiment protocol",
+    { "text": "Calibrate sensor rig #2", "image": "rig2.jpg" }
+  ]
+  ```
+
+  Picture files go in `static/media/` alongside the videos and are named
+  here by filename only. Around 800px wide is the right size — that's how
+  large they actually render on the 1080p panel, and anything bigger just
+  costs the Pi decode time without looking better. If a picture is missing
+  or won't load, that slide quietly falls back to text only.
 - Drop `.mp4` files into `static/media/`, then list their filenames in the
-  `MEDIA_FILES` array near the bottom of `static/js/main.js`.
+  `MEDIA_FILES` array near the bottom of `static/js/main.js`. Videos must be
+  H.264 and no wider than 1920px — that's all the Pi can decode in hardware,
+  and anything else will bog the display down.
 
 ### 8. Reboot and confirm the kiosk comes up unattended
 

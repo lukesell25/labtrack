@@ -1,5 +1,5 @@
 {
-  "_comment": "Edit this file any time to change what the screensaver cycles through. No restart needed - it's re-read each time the screensaver loads.",
+  "_comment": "Edit this file any time to change what the screensaver cycles through. No restart needed - it's re-read every 60s. Each objective is either a plain string, or an object {\"text\": \"...\", \"image\": \"picture.png\"} to show a picture beside the text. Image files go in static/media/ and are named here by filename only; around 800px wide is plenty.",
   "lab_name": "Lab Status Board",
   "objectives": [
     "Finalize Q3 experiment protocol",

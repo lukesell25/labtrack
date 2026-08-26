@@ -147,6 +147,40 @@ body.kiosk.is-note-prompt {
   text-align: center;
 }
 
+/* An objective with a picture puts the two side by side - the kiosk panel is
+   much wider than it is tall, so a stacked layout wastes most of it. The
+   class is added by main.js only when that objective actually has an image
+   (and removed again if the file fails to load). */
+.slide.has-image {
+  flex-direction: row;
+  gap: 3rem;
+  text-align: left;
+}
+
+.slide__image {
+  display: none;
+  max-width: 45%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.slide.has-image .slide__image {
+  display: block;
+}
+
+.slide__body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  min-width: 0;
+}
+
+.slide.has-image .slide__body {
+  align-items: flex-start;
+}
+
 .slide__label {
   font-family: var(--mono);
   font-size: 0.8rem;

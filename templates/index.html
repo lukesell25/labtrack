@@ -17,8 +17,11 @@
     <section class="media" id="media">
       <video id="media-video" autoplay muted playsinline></video>
       <div class="slide" id="media-slide">
-        <div class="slide__label">Current objective</div>
-        <div class="slide__text" id="slide-text"></div>
+        <img class="slide__image" id="slide-image" alt="" decoding="async">
+        <div class="slide__body">
+          <div class="slide__label">Current objective</div>
+          <div class="slide__text" id="slide-text"></div>
+        </div>
       </div>
       <div class="media__empty" id="media-empty">
         Add objectives to <code>config/objectives.json</code>, or drop .mp4 files
