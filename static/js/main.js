@@ -299,6 +299,40 @@ if (BACKGROUND_VIDEO) {
   bgVideoEl.src = `/static/media/${BACKGROUND_VIDEO}`;
 }
 
+// --- TEMPORARY: on-screen video diagnostics -------------------------
+// Flip to true, restart the kiosk, and read the box in the top-left corner.
+// The line that matters is "frames": if it keeps climbing while the picture
+// is frozen, the decoder is fine and the problem is compositing; if it stops
+// climbing, the decode pipeline itself stalled. Delete this block once the
+// background-video freeze on the Pi is diagnosed.
+const DEBUG_VIDEO = false;
+
+if (DEBUG_VIDEO) {
+  const box = document.createElement("div");
+  box.style.cssText =
+    "position:fixed;top:0;left:0;z-index:99;background:#000;color:#0f0;" +
+    "font:13px ui-monospace,monospace;padding:8px 10px;white-space:pre;";
+  document.body.appendChild(box);
+  let lastFrames = -1;
+  let stalledFor = 0;
+  setInterval(() => {
+    const v = bgVideoEl;
+    const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
+    const frames = q ? q.totalVideoFrames : -1;
+    stalledFor = frames === lastFrames ? stalledFor + 1 : 0;
+    lastFrames = frames;
+    box.textContent = [
+      `t        ${v.currentTime.toFixed(2)} / ${(v.duration || 0).toFixed(2)}`,
+      `frames   ${frames}   dropped ${q ? q.droppedVideoFrames : "?"}`,
+      `stalled  ${stalledFor}s`,
+      `ready    ${v.readyState}   net ${v.networkState}   paused ${v.paused}`,
+      `error    ${v.error ? v.error.code + " " + v.error.message : "-"}`,
+      `buffered ${v.buffered.length ? v.buffered.end(v.buffered.length - 1).toFixed(1) : "-"}`,
+      `has-bg   ${document.body.classList.contains("has-bg")}`,
+    ].join("\n");
+  }, 1000);
+}
+
 async function loadObjectives() {
   try {
     const res = await fetch("/api/objectives");
