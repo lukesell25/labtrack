@@ -45,6 +45,31 @@ the routes/UI directly.
 `scripts/setup.sh` is the Pi deployment installer only (installs
 `pcscd`/`opensc`, kiosk Chromium, systemd services) — never run it in dev.
 
+### Kiosk slide rotation
+
+The media panel cycles one combined playlist built by `buildPlaylist()`:
+every objective as a text slide, then every file in `MEDIA_FILES` (a
+hardcoded array in `main.js` — there's no directory-listing endpoint, so
+filenames must be added there by hand after dropping them in
+`static/media/`). Text slides advance on a `SLIDE_MS` timer; videos advance
+on the `ended` event.
+
+Three things here are easy to break:
+
+- **Never put the `loop` attribute back on the `<video>` in
+  `index.html`.** With it always on, `ended` never fires and the rotation
+  can't move past the first video — that was a real bug. `main.js` sets
+  `videoEl.loop` per item instead, turning it on only when the playlist has
+  exactly one entry (nothing to advance to, so loop natively rather than
+  re-fetching the same file each time it ends).
+- **The video element's `ended`/`error` events can arrive after the
+  rotation has already moved on** (a 404 reports its error a beat late).
+  Both handlers check `activeType === "video"` first; without that guard a
+  stale error cuts the *next* text slide short.
+- **The rotation is started by the first `loadObjectives()`, not at script
+  load.** Starting earlier meant a video slot could begin fetching and then
+  be abandoned a moment later when the objectives arrived.
+
 ## Performance (read before any UI change)
 
 The target hardware is a Raspberry Pi 4B driving an always-on Chromium
@@ -159,17 +184,17 @@ Hardware accelerated" is what you want.
 - **`config/members.json`** — EDIPI → display name roster. Edited by the lab
   admin directly; re-synced into the DB on every app startup (restart
   required to pick up changes).
-- **`config/objectives.json`** — kiosk screensaver text; re-read by the
-  frontend every 60s with no restart needed (`/api/objectives`).
+- **`config/objectives.json`** — kiosk screensaver text. Each objective
+  becomes one full-panel slide in the media rotation (see below). Re-read by
+  the frontend every 60s with no restart needed (`/api/objectives`); a change
+  restarts the rotation from the first slide.
 - **Frontend** (`templates/` + `static/js/`) — no build step, no framework;
   plain JS polling JSON endpoints. Every render function is guarded by a
   change check (see Performance above) — the polls are frequent, the data
   almost never changes. `main.js` drives the kiosk
   (`templates/index.html`): polls `/api/state` every `POLL_MS` (1.5s) to show
-  toast confirmations and the "reading card..." overlay, cycles background
-  media from a hardcoded `MEDIA_FILES` array (files must be manually listed
-  here after dropping them in `static/media/`), and reloads objectives every
-  60s. `lastEventId` starts as `null`, not `0`, deliberately — the first poll
+  toast confirmations and the "reading card..." overlay, drives the slide
+  rotation, and reloads objectives every 60s. `lastEventId` starts as `null`, not `0`, deliberately — the first poll
   only establishes a baseline so a stale event doesn't pop a toast on page
   load, and `0` would make "no baseline" indistinguishable from a real
   first event. `dashboard.js` drives `templates/dashboard.html`: polls

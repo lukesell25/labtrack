@@ -168,6 +168,103 @@ async function poll() {
 setInterval(poll, POLL_MS);
 poll();
 
+// --- slide rotation --------------------------------------------------
+// The media panel cycles a single combined playlist: every objective from
+// config/objectives.json as a text slide, followed by every video in
+// MEDIA_FILES. Videos advance when they finish; text slides advance on a
+// timer. Slides swap instantly - a crossfade would mean compositing two
+// full-panel layers on every rotation (see Performance in CLAUDE.md).
+//
+// Since the app doesn't have a directory listing endpoint, list media
+// filenames here as you add them to static/media/ - keeps this dead simple
+// with no extra backend route.
+const MEDIA_FILES = [
+  // "sim1.mp4", "sim2.mp4",
+];
+
+const SLIDE_MS = 12000;            // how long one objective slide stays up
+const VIDEO_ERROR_RETRY_MS = 3000;
+
+const videoEl = document.getElementById("media-video");
+const slideEl = document.getElementById("media-slide");
+const slideTextEl = document.getElementById("slide-text");
+const emptyEl = document.getElementById("media-empty");
+
+let objectives = [];
+let rotationIndex = 0;
+let rotationTimer = null;
+let rotationStarted = false;
+// Which kind of item is on screen right now. The video element's events fire
+// asynchronously and can arrive after the rotation has already moved on (a
+// 404 on a media file reports its error a beat later), so the handlers below
+// check this before acting - otherwise a stale event cuts a text slide short.
+let activeType = null;
+
+function buildPlaylist() {
+  return [
+    ...objectives.map(text => ({ type: "objective", text })),
+    ...MEDIA_FILES.map(file => ({ type: "video", file })),
+  ];
+}
+
+function showNextSlide() {
+  clearTimeout(rotationTimer);
+
+  const playlist = buildPlaylist();
+  if (playlist.length === 0) {
+    videoEl.style.display = "none";
+    slideEl.style.display = "none";
+    emptyEl.style.display = "block";
+    return;
+  }
+
+  const item = playlist[rotationIndex % playlist.length];
+  rotationIndex = (rotationIndex + 1) % playlist.length;
+  activeType = item.type;
+  emptyEl.style.display = "none";
+
+  if (item.type === "objective") {
+    videoEl.pause();  // stop decoding while a text slide is up
+    videoEl.style.display = "none";
+    if (slideTextEl.textContent !== item.text) slideTextEl.textContent = item.text;
+    slideEl.style.display = "flex";
+    rotationTimer = setTimeout(showNextSlide, SLIDE_MS);
+    return;
+  }
+
+  slideEl.style.display = "none";
+  videoEl.style.display = "block";
+  // With a single item there is nothing to advance to, so let the element
+  // loop natively rather than re-fetching and re-decoding the same file
+  // every time it ends. Note this is also why "loop" is not hardcoded in
+  // index.html: with it always on, "ended" never fires and the rotation
+  // could never move past the first video.
+  videoEl.loop = playlist.length === 1;
+  videoEl.src = `/static/media/${item.file}`;
+  videoEl.play().catch(() => {});
+}
+
+function restartRotation() {
+  rotationStarted = true;
+  rotationIndex = 0;
+  showNextSlide();
+}
+
+videoEl.addEventListener("ended", () => {
+  if (activeType !== "video" || videoEl.loop) return;
+  showNextSlide();
+});
+
+// A missing or undecodable file shouldn't strand the board on a black
+// panel. Wait before moving on so a playlist of entirely broken files
+// can't spin in a tight loop.
+videoEl.addEventListener("error", () => {
+  if (activeType !== "video") return;
+  console.error("media failed to play:", videoEl.currentSrc);
+  clearTimeout(rotationTimer);
+  rotationTimer = setTimeout(showNextSlide, VIDEO_ERROR_RETRY_MS);
+});
+
 async function loadObjectives() {
   try {
     const res = await fetch("/api/objectives");
@@ -175,39 +272,19 @@ async function loadObjectives() {
     const json = JSON.stringify(data.objectives);
     if (json === loadObjectives._last) return;
     loadObjectives._last = json;
-    const list = document.getElementById("objectives-list");
-    list.innerHTML = data.objectives.map(o => `<li>${escapeHtml(o)}</li>`).join("");
+    objectives = data.objectives || [];
+    // Only reached when objectives.json actually changed, so restarting the
+    // rotation here costs nothing in the steady state.
+    restartRotation();
   } catch (e) {
     console.error("failed to load objectives", e);
+    // Objectives are unavailable, but any videos should still play.
+    if (!rotationStarted) restartRotation();
   }
 }
+
+// The rotation is started by the first loadObjectives() rather than here, so
+// a video slot never gets loaded and then immediately abandoned when the
+// objectives arrive a moment later.
 loadObjectives();
 setInterval(loadObjectives, 60000); // pick up edits to objectives.json without a restart
-
-// --- media loop -----------------------------------------------------
-// Cycles through any .mp4 files placed in static/media/. Since the app
-// doesn't have a directory listing endpoint, define the filenames here as
-// you add them - keeps this dead simple with no extra backend route.
-const MEDIA_FILES = [
-  // "sim1.mp4", "sim2.mp4",
-];
-
-let mediaIndex = 0;
-const videoEl = document.getElementById("media-video");
-const emptyEl = document.getElementById("media-empty");
-
-function playNextMedia() {
-  if (MEDIA_FILES.length === 0) {
-    videoEl.style.display = "none";
-    emptyEl.style.display = "block";
-    return;
-  }
-  emptyEl.style.display = "none";
-  videoEl.style.display = "block";
-  videoEl.src = `/static/media/${MEDIA_FILES[mediaIndex]}`;
-  videoEl.play().catch(() => {});
-  mediaIndex = (mediaIndex + 1) % MEDIA_FILES.length;
-}
-
-videoEl.addEventListener("ended", playNextMedia);
-playNextMedia();

@@ -115,47 +115,6 @@ body.kiosk.is-note-prompt {
   font-variant-numeric: tabular-nums;
 }
 
-.objectives {
-  margin-bottom: 2rem;
-}
-
-.objectives__label {
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  letter-spacing: 0.12em;
-  color: var(--text-low);
-  text-transform: uppercase;
-  margin-bottom: 0.75rem;
-}
-
-.objectives__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-.objectives__list li {
-  font-size: 1.35rem;
-  font-weight: 500;
-  padding-left: 1.4rem;
-  position: relative;
-  color: var(--text-hi);
-}
-
-.objectives__list li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.55em;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--phosphor);
-}
-
 .media {
   flex: 1;
   min-height: 0;
@@ -174,6 +133,34 @@ body.kiosk.is-note-prompt {
   height: 100%;
   object-fit: cover;
   display: none;
+}
+
+.slide {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  width: 100%;
+  height: 100%;
+  padding: 3rem;
+  text-align: center;
+}
+
+.slide__label {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.slide__text {
+  font-size: clamp(1.8rem, 4.5vw, 3.4rem);
+  font-weight: 600;
+  line-height: 1.25;
+  max-width: 20ch;
+  color: var(--text-hi);
 }
 
 .media__empty {

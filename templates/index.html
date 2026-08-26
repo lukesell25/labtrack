@@ -14,15 +14,15 @@
       <div class="board__clock" id="clock">--:--:--</div>
     </header>
 
-    <section class="objectives" id="objectives">
-      <div class="objectives__label">Current objectives</div>
-      <ul class="objectives__list" id="objectives-list"></ul>
-    </section>
-
     <section class="media" id="media">
-      <video id="media-video" autoplay muted loop playsinline></video>
+      <video id="media-video" autoplay muted playsinline></video>
+      <div class="slide" id="media-slide">
+        <div class="slide__label">Current objective</div>
+        <div class="slide__text" id="slide-text"></div>
+      </div>
       <div class="media__empty" id="media-empty">
-        Drop .mp4 files into <code>static/media/</code> to cycle simulations here.
+        Add objectives to <code>config/objectives.json</code>, or drop .mp4 files
+        into <code>static/media/</code>, to cycle them here.
       </div>
     </section>
   </main>
