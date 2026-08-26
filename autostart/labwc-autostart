@@ -21,6 +21,16 @@ done
 # launch. /etc/chromium.d/99-labtrack-password-store (installed alongside
 # this file) applies the same flag to every launch of chromium, including
 # manual ones from a menu - see that file for why both exist.
+# Performance flags for the Pi 4's V3D GPU:
+#   --ignore-gpu-blocklist + --enable-gpu-rasterization force Chromium to
+#   rasterize on the GPU. Chromium frequently blocklists the Pi's driver and
+#   silently falls back to software rasterization, which is the difference
+#   between a smooth board and a visibly sluggish one. Verify which path you
+#   actually got by opening chrome://gpu on the Pi and checking that
+#   "Rasterization" says "Hardware accelerated". If you ever see rendering
+#   artifacts, these two flags are the first thing to drop.
+#   --disable-background-networking stops Chromium's periodic phone-home
+#   fetches, which is pure wasted CPU on an appliance showing one local page.
 chromium \
   --kiosk \
   --noerrdialogs \
@@ -29,4 +39,8 @@ chromium \
   --password-store=basic \
   --check-for-update-interval=31536000 \
   --ozone-platform=wayland \
+  --ignore-gpu-blocklist \
+  --enable-gpu-rasterization \
+  --disable-background-networking \
+  --disable-features=Translate \
   http://localhost:5000 &

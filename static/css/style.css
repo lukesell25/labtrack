@@ -14,8 +14,8 @@
   --phosphor-dim: #17513c;
   --danger: #ff5a5a;
 
-  --mono: "IBM Plex Mono", ui-monospace, monospace;
-  --sans: "Inter", system-ui, sans-serif;
+  --mono: ui-monospace, "DejaVu Sans Mono", monospace;
+  --sans: system-ui, "DejaVu Sans", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -41,22 +41,10 @@ body.kiosk {
   cursor: none;
 }
 
-body.kiosk:has(.toast.is-out.is-visible) {
+/* Toggled from main.js while the note prompt is up - a :has() selector on
+   <body> would re-run on every roster re-render. */
+body.kiosk.is-note-prompt {
   cursor: auto;
-}
-
-.scanlines {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to bottom,
-    rgba(255,255,255,0.015) 0px,
-    rgba(255,255,255,0.015) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  z-index: 50;
 }
 
 .board {
@@ -87,20 +75,16 @@ body.kiosk:has(.toast.is-out.is-visible) {
   position: fixed;
   inset: 0;
   z-index: 55;
-  display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 1.5rem;
-  background: rgba(14, 17, 22, 0.92);
-  backdrop-filter: blur(4px);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease;
+  background: var(--graphite-900);
+  display: none;
 }
 
 .reading-overlay.is-visible {
-  opacity: 1;
+  display: flex;
 }
 
 .reading-overlay__dot {
@@ -108,7 +92,6 @@ body.kiosk:has(.toast.is-out.is-visible) {
   height: 22px;
   border-radius: 50%;
   background: var(--phosphor);
-  box-shadow: 0 0 24px var(--phosphor);
   animation: reading-pulse 1s ease-in-out infinite;
 }
 
@@ -121,8 +104,8 @@ body.kiosk:has(.toast.is-out.is-visible) {
 }
 
 @keyframes reading-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.35; transform: scale(0.8); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 .board__clock {
@@ -171,7 +154,6 @@ body.kiosk:has(.toast.is-out.is-visible) {
   height: 6px;
   border-radius: 50%;
   background: var(--phosphor);
-  box-shadow: 0 0 6px var(--phosphor);
 }
 
 .media {
@@ -230,13 +212,11 @@ body.kiosk:has(.toast.is-out.is-visible) {
   border-radius: 50%;
   border: 2px solid var(--text-low);
   flex-shrink: 0;
-  transition: all 0.3s ease;
 }
 
 .roster__card.is-in .roster__ring {
   border-color: var(--phosphor);
   background: var(--phosphor);
-  box-shadow: 0 0 10px var(--phosphor);
 }
 
 .roster__meta {
@@ -278,21 +258,16 @@ body.kiosk:has(.toast.is-out.is-visible) {
   position: fixed;
   inset: 0;
   z-index: 60;
-  display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  background: rgba(14, 17, 22, 0.92);
-  backdrop-filter: blur(4px);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.25s ease;
+  background: var(--graphite-900);
+  display: none;
 }
 
 .toast.is-visible {
-  opacity: 1;
-  pointer-events: auto;
+  display: flex;
 }
 
 .toast__name {
@@ -376,8 +351,8 @@ body.kiosk:has(.toast.is-out.is-visible) {
 }
 
 .toast__note-btn:focus {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--amber);
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
 }
 
 .toast__note-btn--save {

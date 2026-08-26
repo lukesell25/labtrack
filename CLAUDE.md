@@ -45,6 +45,55 @@ the routes/UI directly.
 `scripts/setup.sh` is the Pi deployment installer only (installs
 `pcscd`/`opensc`, kiosk Chromium, systemd services) — never run it in dev.
 
+## Performance (read before any UI change)
+
+The target hardware is a Raspberry Pi 4B driving an always-on Chromium
+kiosk. **Treat rendering cost as a hard constraint, and prefer a plainer
+look over a smoother one** — visual polish that costs frames is not worth
+it here. This is a standing preference from the lab admin, not a one-off
+cleanup.
+
+What was already removed for this reason (don't reintroduce it):
+
+- **`backdrop-filter` / `filter: blur()`** — the worst offender on this
+  hardware. A full-screen blurred overlay makes the GPU re-read and blur
+  everything beneath it every frame. The toast and reading overlays use a
+  fully opaque background instead, which also lets the compositor skip
+  painting what's behind them.
+- **Full-screen decorative overlays** — a `.scanlines` repeating-gradient
+  layer sat over the whole screen and forced a compositing pass on every
+  repaint underneath.
+- **`box-shadow` glows** — each is a separate blur rasterization. Use flat
+  color; use `outline` (not `box-shadow`) for focus rings.
+- **Animating anything but `opacity`/`transform`** — the "reading card"
+  dot animates opacity only. Avoid animating a `transform` on top of a
+  `box-shadow`, which re-rasterizes the shadow every frame.
+- **Webfonts** — the Google Fonts `<link>` was render-blocking on every
+  kiosk boot and a hard dependency on outbound internet the lab may not
+  have. `--mono`/`--sans` are system stacks now; keep it that way.
+- **Overlays parked at `opacity: 0`** — they stay in the paint/composite
+  tree. Hide with `display: none` so idle costs nothing (the kiosk is idle
+  ~99% of the time).
+- **`:has()` on `<body>`** — re-runs selector matching on every DOM
+  mutation, and the roster re-renders on a timer. Toggle a class from JS.
+
+Two rules that matter for anything new:
+
+- **Poll handlers must not touch the DOM when nothing changed.** Every
+  render function compares a JSON snapshot of its data first and bails out
+  (`skipIfUnchanged()` in `dashboard.js`, `lastRosterJson` /
+  `lastClockText` / `loadObjectives._last` in `main.js`). Without that
+  guard, `innerHTML` rebuilds relayout the section 40x a minute forever.
+  Any new polled section needs the same guard.
+- **Screensaver video must be H.264 (AVC).** The Pi 4 hardware-decodes
+  H.264; HEVC/VP9/AV1 fall back to software decode and will peg the CPU.
+
+`autostart/labwc-autostart` passes `--ignore-gpu-blocklist
+--enable-gpu-rasterization` because Chromium often blocklists the Pi's V3D
+driver and silently drops to software rasterization. If the board ever
+looks sluggish again, check `chrome://gpu` on the Pi first — "Rasterization:
+Hardware accelerated" is what you want.
+
 ## Architecture
 
 - **`app.py`** — Flask app + routes. Holds two small pieces of in-memory,
@@ -113,7 +162,9 @@ the routes/UI directly.
 - **`config/objectives.json`** — kiosk screensaver text; re-read by the
   frontend every 60s with no restart needed (`/api/objectives`).
 - **Frontend** (`templates/` + `static/js/`) — no build step, no framework;
-  plain JS polling JSON endpoints. `main.js` drives the kiosk
+  plain JS polling JSON endpoints. Every render function is guarded by a
+  change check (see Performance above) — the polls are frequent, the data
+  almost never changes. `main.js` drives the kiosk
   (`templates/index.html`): polls `/api/state` every `POLL_MS` (1.5s) to show
   toast confirmations and the "reading card..." overlay, cycles background
   media from a hardcoded `MEDIA_FILES` array (files must be manually listed

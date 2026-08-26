@@ -25,13 +25,22 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+let lastClockText = "";
 function renderClock() {
-  document.getElementById("clock").textContent = new Date().toLocaleTimeString();
+  const text = new Date().toLocaleTimeString();
+  if (text === lastClockText) return;
+  lastClockText = text;
+  document.getElementById("clock").textContent = text;
 }
 setInterval(renderClock, 1000);
 renderClock();
 
+let lastRosterJson = "";
 function renderRoster(roster) {
+  const json = JSON.stringify(roster);
+  if (json === lastRosterJson) return;
+  lastRosterJson = json;
+
   const el = document.getElementById("roster");
   el.innerHTML = roster.map(m => `
     <div class="roster__card ${m.status === 'in' ? 'is-in' : ''}">
@@ -47,6 +56,7 @@ function renderRoster(roster) {
 
 function hideNotePrompt() {
   document.getElementById("toast-note").style.display = "none";
+  document.body.classList.remove("is-note-prompt");
   clearTimeout(showToast._noteTimeout);
 }
 
@@ -82,6 +92,7 @@ function showToast(event) {
     const noteSection = document.getElementById("toast-note");
     const input = document.getElementById("note-input");
     noteSection.style.display = "flex";
+    document.body.classList.add("is-note-prompt");
     input.value = "";
     setTimeout(() => input.focus(), 50);
 
@@ -161,8 +172,11 @@ async function loadObjectives() {
   try {
     const res = await fetch("/api/objectives");
     const data = await res.json();
+    const json = JSON.stringify(data.objectives);
+    if (json === loadObjectives._last) return;
+    loadObjectives._last = json;
     const list = document.getElementById("objectives-list");
-    list.innerHTML = data.objectives.map(o => `<li>${o}</li>`).join("");
+    list.innerHTML = data.objectives.map(o => `<li>${escapeHtml(o)}</li>`).join("");
   } catch (e) {
     console.error("failed to load objectives", e);
   }
