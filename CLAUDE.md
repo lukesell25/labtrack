@@ -110,14 +110,25 @@ Two rules that matter for anything new:
   `lastClockText` / `loadObjectives._last` in `main.js`). Without that
   guard, `innerHTML` rebuilds relayout the section 40x a minute forever.
   Any new polled section needs the same guard.
-- **Screensaver video must be H.264 (AVC).** The Pi 4 hardware-decodes
-  H.264; HEVC/VP9/AV1 fall back to software decode and will peg the CPU.
+- **Screensaver video must be H.264 (AVC) and no wider than 1920px.**
+  Confirmed from `chrome://gpu` on the deployed Pi: the only hardware decode
+  profiles are h264 baseline/main/high, 32x32 to 1920x1920. HEVC/VP9/AV1, or
+  anything above 1920px, falls back to software decode and will peg the CPU.
+  Note the kiosk panel is wider than that (3440x1440), so encode media to
+  1080p and let it scale up — do not encode at panel resolution.
 
-`autostart/labwc-autostart` passes `--ignore-gpu-blocklist
---enable-gpu-rasterization` because Chromium often blocklists the Pi's V3D
-driver and silently drops to software rasterization. If the board ever
-looks sluggish again, check `chrome://gpu` on the Pi first — "Rasterization:
-Hardware accelerated" is what you want.
+**The kiosk display is a 3440x1440 ultrawide** — ~4.9M pixels, about 2.4x a
+1080p panel. Every full-screen effect costs proportionally more here, which
+is why the full-screen blurred overlays hurt as much as they did. Assume any
+effect covering the whole screen is expensive on this hardware.
+
+The GPU path was verified on the deployed Pi (V3D 4.2.14.0, Mesa 26.2.0,
+Chrome 151): Rasterization, Compositing, Canvas and Video Decode all report
+hardware accelerated. `autostart/labwc-autostart` passes
+`--enable-gpu-rasterization`; it deliberately does *not* pass
+`--ignore-gpu-blocklist`, since the blocklist was shown not to be vetoing
+anything on this hardware. If the board ever looks sluggish again, re-check
+`chrome://gpu` on the Pi before changing code.
 
 ## Architecture
 

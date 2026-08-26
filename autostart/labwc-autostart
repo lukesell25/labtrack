@@ -22,15 +22,20 @@ done
 # this file) applies the same flag to every launch of chromium, including
 # manual ones from a menu - see that file for why both exist.
 # Performance flags for the Pi 4's V3D GPU:
-#   --ignore-gpu-blocklist + --enable-gpu-rasterization force Chromium to
-#   rasterize on the GPU. Chromium frequently blocklists the Pi's driver and
-#   silently falls back to software rasterization, which is the difference
-#   between a smooth board and a visibly sluggish one. Verify which path you
-#   actually got by opening chrome://gpu on the Pi and checking that
-#   "Rasterization" says "Hardware accelerated". If you ever see rendering
-#   artifacts, these two flags are the first thing to drop.
+#   --enable-gpu-rasterization keeps rasterization on the GPU rather than the
+#   CPU. Raspberry Pi OS already passes this from its own /etc/chromium.d/
+#   drop-in, so it is belt-and-braces - it stays here so this launch doesn't
+#   silently depend on a distro default that could change.
 #   --disable-background-networking stops Chromium's periodic phone-home
 #   fetches, which is pure wasted CPU on an appliance showing one local page.
+#
+#   Deliberately NOT passing --ignore-gpu-blocklist: a chrome://gpu dump from
+#   this Pi (V3D 4.2.14.0, Mesa 26.2.0, Chrome 151) reports "Rasterization:
+#   Hardware accelerated on all pages" WITHOUT that flag, so the blocklist
+#   isn't vetoing anything here and overriding it would only risk artifacts.
+#   To re-check after a Chromium or Mesa update, open chrome://gpu on the Pi:
+#   Rasterization, Compositing, Canvas and Video Decode should all say
+#   hardware accelerated.
 chromium \
   --kiosk \
   --noerrdialogs \
@@ -39,7 +44,6 @@ chromium \
   --password-store=basic \
   --check-for-update-interval=31536000 \
   --ozone-platform=wayland \
-  --ignore-gpu-blocklist \
   --enable-gpu-rasterization \
   --disable-background-networking \
   --disable-features=Translate \
