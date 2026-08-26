@@ -159,6 +159,16 @@ Rules that matter for anything new:
   `lastClockText` / `loadObjectives._last` in `main.js`). Without that
   guard, `innerHTML` rebuilds relayout the section 40x a minute forever.
   Any new polled section needs the same guard.
+- **The background video must be muxed with `-movflags +faststart`.** With
+  the `moov` index at the end of the file (ffmpeg's default), Chromium has
+  to range-request the tail before it can play, and on the Pi that fetch
+  pattern stalls partway through — the video freezes after a few seconds
+  with `readyState` 2 and *no* error code, so the `error` fallback never
+  fires and the board just sits on a dead frame. Confirmed on real
+  hardware: playback died needing byte 4,695,155 of 6,258,671 (75%), with
+  `moov` at 99.9%. It does not reproduce on a dev machine, which buffers
+  the whole file before the pattern matters. `grep -abo moov file.mp4 |
+  head -1` should report a low offset.
 - **The background video must be H.264 (AVC) and no wider than 1920px.**
   Confirmed from `chrome://gpu` on the Pi: the only hardware decode profiles
   are h264 baseline/main/high, 32x32 to 1920x1920. HEVC/VP9/AV1, or anything

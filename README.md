@@ -196,7 +196,25 @@ optional looping background video.
   ```bash
   ffmpeg -i source.mov -an -c:v libx264 -profile:v high -pix_fmt yuv420p \
          -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-         -b:v 4M -g 60 background.mp4
+         -r 30 -b:v 4M -g 60 -movflags +faststart background.mp4
+  ```
+
+  **`-movflags +faststart` is not optional.** Without it ffmpeg writes the
+  `moov` index at the *end* of the file, forcing Chromium to fetch the tail
+  with a separate range request before it can play anything. On the Pi that
+  fetch pattern stalls partway through: the video plays a few seconds and
+  then freezes, `readyState` drops to 2 (starved of data) with no error
+  code, and the rest of the board keeps working normally. Fix an existing
+  file without re-encoding it:
+
+  ```bash
+  ffmpeg -i background.mp4 -c copy -movflags +faststart fixed.mp4
+  ```
+
+  To check a file, confirm `moov` sits near the start rather than the end:
+
+  ```bash
+  grep -abo moov background.mp4 | head -1
   ```
 
   The video also stays visible behind the check-in/check-out confirmation
