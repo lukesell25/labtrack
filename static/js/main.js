@@ -121,8 +121,18 @@ function showToast(event) {
     document.getElementById("note-save").onclick = save;
     document.getElementById("note-skip").onclick = finish;
 
+    // Enter from the text box moves the selection onto a button rather than
+    // acting straight away: what they typed picks which button is offered,
+    // and a second Enter on that button commits it. A focused <button>
+    // activates on Enter natively, so that second step needs no handler -
+    // and because the button isn't focused yet when this keydown fires, the
+    // same keypress can't fall through and activate it.
     input.onkeydown = (e) => {
       if (e.key === "ArrowDown") { e.preventDefault(); skipBtn.focus(); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        (input.value.trim() ? saveBtn : skipBtn).focus();
+      }
     };
     skipBtn.onkeydown = (e) => {
       if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
