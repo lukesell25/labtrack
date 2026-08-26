@@ -128,15 +128,41 @@ body.kiosk.is-note-prompt {
   justify-content: center;
 }
 
-.media video {
+/* Looping background video. Absolutely positioned so it fills the panel
+   without affecting the slide's centring, and left at display:none until
+   main.js confirms a file is configured and it actually decodes - the kiosk
+   shouldn't hold a black rect (or a compositing layer) for a video that
+   isn't there. */
+.media__bg {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: none;
 }
 
+/* Flat dim over the video so slide text stays readable against whatever the
+   footage is doing. A single opaque-ish fill, not a backdrop-filter: the
+   blur version re-reads and blurs the video every frame, which is exactly
+   the effect that made the Pi sluggish before (see Performance in CLAUDE.md). */
+.media__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(14, 17, 22, 0.5);
+  display: none;
+}
+
+/* Flagged on <body>, not on .media: the toast and reading overlays live
+   outside the panel and need to know whether there's a video to reveal. */
+body.has-bg .media__bg,
+body.has-bg .media__scrim {
+  display: block;
+}
+
 .slide {
   display: none;
+  position: relative;   /* paint above the background video and its scrim */
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -198,6 +224,7 @@ body.kiosk.is-note-prompt {
 }
 
 .media__empty {
+  position: relative;
   font-family: var(--mono);
   color: var(--text-low);
   font-size: 0.95rem;
@@ -388,6 +415,31 @@ body.kiosk.is-note-prompt {
 }
 
 /* ---- dashboard --------------------------------------------------- */
+/* ---- overlays over the background video -------------------------- */
+/* With a video configured, the confirmation overlays dim it instead of
+   covering it, so the board keeps moving while someone taps in. Gated on
+   has-bg rather than applied unconditionally: with no video there is nothing
+   to reveal, and a fully opaque overlay lets the compositor skip painting
+   the whole board underneath (Performance above). The cost only applies
+   while an overlay is actually up - 4s per tap, or 15s for a note prompt. */
+body.has-bg .toast,
+body.has-bg .reading-overlay {
+  background: rgba(14, 17, 22, 0.72);
+}
+
+/* While an overlay is up, drop the panel's own scrim and hide the slide.
+   Two stacked scrims leave the video almost black (0.28 x 0.28 of it gets
+   through), and the slide text would otherwise ghost through behind the
+   person's name. visibility, not display, because main.js owns the slide's
+   inline display value and would win the specificity fight. */
+body.has-bg.is-overlay .media__scrim {
+  display: none;
+}
+
+body.has-bg.is-overlay .slide {
+  visibility: hidden;
+}
+
 body.dashboard {
   overflow: auto;
   padding: 2.5rem clamp(1.5rem, 5vw, 4rem);

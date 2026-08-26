@@ -55,7 +55,8 @@ labtrack/
   config/members.json       EDIPI -> name roster (edit this!)
   config/objectives.json    Screensaver text content (edit any time)
   templates/                Kiosk + dashboard HTML
-  static/                   CSS, JS, and a media/ folder for .mp4 loops
+  static/                   CSS, JS, and a media/ folder for slide pictures
+                            and the background video
   systemd/labtrack.service   Runs the app on boot
   autostart/*.desktop       Launches Chromium kiosk mode on desktop login
   scripts/setup.sh          Installs everything below in one go
@@ -167,8 +168,8 @@ fallback, but issuance details vary.
 
 ### 7. Add screensaver content
 
-The kiosk cycles one rotation: each objective as a full-screen slide, then
-each video.
+The kiosk cycles the objectives, one full-panel slide at a time, over an
+optional looping background video.
 
 - Edit `config/objectives.json` any time — no restart needed, it's re-read
   every 60 seconds by the kiosk page. Each objective is either a plain
@@ -181,15 +182,34 @@ each video.
   ]
   ```
 
-  Picture files go in `static/media/` alongside the videos and are named
-  here by filename only. Around 800px wide is the right size — that's how
-  large they actually render on the 1080p panel, and anything bigger just
-  costs the Pi decode time without looking better. If a picture is missing
-  or won't load, that slide quietly falls back to text only.
-- Drop `.mp4` files into `static/media/`, then list their filenames in the
-  `MEDIA_FILES` array near the bottom of `static/js/main.js`. Videos must be
-  H.264 and no wider than 1920px — that's all the Pi can decode in hardware,
-  and anything else will bog the display down.
+  Picture files go in `static/media/` and are named here by filename only.
+  Around 800px wide is the right size — that's how large they actually
+  render on the 1080p panel, and anything bigger just costs the Pi decode
+  time without looking better. If a picture is missing or won't load, that
+  slide quietly falls back to text only.
+- **Background video** (optional): drop one `.mp4` into `static/media/`,
+  then set `BACKGROUND_VIDEO` near the bottom of `static/js/main.js` to its
+  filename. It loops continuously behind every slide, with a flat dim over
+  it so the text stays readable. Leave `BACKGROUND_VIDEO = ""` for no
+  background. Encode it as:
+
+  ```bash
+  ffmpeg -i source.mov -an -c:v libx264 -profile:v high -pix_fmt yuv420p \
+         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
+         -b:v 4M -g 60 background.mp4
+  ```
+
+  The video also stays visible behind the check-in/check-out confirmation
+  and the "reading card" overlay, dimmed to the same level as behind a
+  slide, so the board never cuts to a flat panel mid-tap.
+
+  H.264 at exactly 1920x1080 is both the panel's native resolution and
+  inside the Pi 4's hardware decode ceiling (1920x1920); HEVC/VP9/AV1 or
+  anything wider falls back to software decode and pegs the CPU. `-an`
+  drops the audio track — the kiosk plays muted, so decoding audio is pure
+  waste. Keep the clip short (20–60s) and make the last frame resemble the
+  first, since it restarts on a hard cut. If the file is missing or won't
+  decode, the slides fall back to the flat panel background.
 
 ### 8. Reboot and confirm the kiosk comes up unattended
 

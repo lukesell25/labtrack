@@ -54,6 +54,23 @@ function renderRoster(roster) {
   `).join("");
 }
 
+// The background video keeps playing behind the confirmation overlays, so the
+// body needs to know when one is up (see .is-overlay in style.css). Derived
+// from the two overlays' actual state rather than toggled independently by
+// each: they overlap when a tap finishes and the toast replaces the "reading
+// card" overlay, and independent toggles would race there.
+function syncOverlayState() {
+  const shown =
+    document.getElementById("toast").classList.contains("is-visible") ||
+    document.getElementById("reading-overlay").classList.contains("is-visible");
+  document.body.classList.toggle("is-overlay", shown);
+}
+
+function setToastVisible(visible) {
+  document.getElementById("toast").classList.toggle("is-visible", visible);
+  syncOverlayState();
+}
+
 function hideNotePrompt() {
   document.getElementById("toast-note").style.display = "none";
   document.body.classList.remove("is-note-prompt");
@@ -73,8 +90,9 @@ function showToast(event) {
     document.getElementById("toast-action").textContent = "";
     document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
     hint.style.display = "none";
-    toast.classList.add("is-error", "is-visible");
-    showToast._t = setTimeout(() => toast.classList.remove("is-visible"), TOAST_VISIBLE_MS);
+    toast.classList.add("is-error");
+    setToastVisible(true);
+    showToast._t = setTimeout(() => setToastVisible(false), TOAST_VISIBLE_MS);
     return;
   }
 
@@ -83,7 +101,7 @@ function showToast(event) {
     event.action === "in" ? "Checked in" : "Checked out";
   document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
   hint.style.display = "block";
-  toast.classList.add("is-visible");
+  setToastVisible(true);
 
   if (event.action === "out" && event.checkin_event_id) {
     // Checking out: offer an optional "why" note instead of auto-hiding on
@@ -97,7 +115,7 @@ function showToast(event) {
     setTimeout(() => input.focus(), 50);
 
     const finish = () => {
-      toast.classList.remove("is-visible");
+      setToastVisible(false);
       hideNotePrompt();
     };
     const save = async () => {
@@ -146,12 +164,13 @@ function showToast(event) {
     showToast._noteTimeout = setTimeout(finish, NOTE_PROMPT_TIMEOUT_MS);
   } else {
     // Checking in (or any non-checkout event): plain toast, auto-hide as before.
-    showToast._t = setTimeout(() => toast.classList.remove("is-visible"), TOAST_VISIBLE_MS);
+    showToast._t = setTimeout(() => setToastVisible(false), TOAST_VISIBLE_MS);
   }
 }
 
 function setReading(active) {
   document.getElementById("reading-overlay").classList.toggle("is-visible", active);
+  syncOverlayState();
 }
 
 async function poll() {
@@ -179,23 +198,21 @@ setInterval(poll, POLL_MS);
 poll();
 
 // --- slide rotation --------------------------------------------------
-// The media panel cycles a single combined playlist: every objective from
-// config/objectives.json as a text slide, followed by every video in
-// MEDIA_FILES. Videos advance when they finish; text slides advance on a
-// timer. Slides swap instantly - a crossfade would mean compositing two
-// full-panel layers on every rotation (see Performance in CLAUDE.md).
-//
-// Since the app doesn't have a directory listing endpoint, list media
-// filenames here as you add them to static/media/ - keeps this dead simple
-// with no extra backend route.
-const MEDIA_FILES = [
-  // "sim1.mp4", "sim2.mp4",
-];
+// The media panel cycles the objectives from config/objectives.json, one
+// full-panel slide at a time, over an optional looping background video.
+// Slides swap instantly - a crossfade would mean compositing two full-panel
+// layers on every rotation (see Performance in CLAUDE.md).
+
+// Filename of the looping background video, inside static/media/. Leave it
+// empty ("") for no background - the panel then just uses its flat card
+// colour. There is deliberately no directory-listing endpoint, so name the
+// file here by hand after dropping it in. It must be H.264 and no wider than
+// 1920px, or the Pi decodes it in software (README step 7).
+const BACKGROUND_VIDEO = "background.mp4";
 
 const SLIDE_MS = 12000;            // how long one objective slide stays up
-const VIDEO_ERROR_RETRY_MS = 3000;
 
-const videoEl = document.getElementById("media-video");
+const bgVideoEl = document.getElementById("media-bg");
 const slideEl = document.getElementById("media-slide");
 const slideTextEl = document.getElementById("slide-text");
 const slideImageEl = document.getElementById("slide-image");
@@ -204,12 +221,6 @@ const emptyEl = document.getElementById("media-empty");
 let objectives = [];
 let rotationIndex = 0;
 let rotationTimer = null;
-let rotationStarted = false;
-// Which kind of item is on screen right now. The video element's events fire
-// asynchronously and can arrive after the rotation has already moved on (a
-// 404 on a media file reports its error a beat later), so the handlers below
-// check this before acting - otherwise a stale event cuts a text slide short.
-let activeType = null;
 
 // An objective is either a plain string or {text, image}, where image is a
 // filename in static/media/. Both forms are supported so config/objectives.json
@@ -217,13 +228,6 @@ let activeType = null;
 function normalizeObjective(entry) {
   if (typeof entry === "string") return { text: entry, image: null };
   return { text: entry.text || "", image: entry.image || null };
-}
-
-function buildPlaylist() {
-  return [
-    ...objectives.map(o => ({ type: "objective", text: o.text, image: o.image })),
-    ...MEDIA_FILES.map(file => ({ type: "video", file })),
-  ];
 }
 
 // Swapping the src re-decodes the picture, so leave it alone when the same
@@ -243,71 +247,57 @@ function setSlideImage(file) {
 function showNextSlide() {
   clearTimeout(rotationTimer);
 
-  const playlist = buildPlaylist();
-  if (playlist.length === 0) {
-    videoEl.style.display = "none";
+  if (objectives.length === 0) {
     slideEl.style.display = "none";
     emptyEl.style.display = "block";
     return;
   }
 
-  const item = playlist[rotationIndex % playlist.length];
-  rotationIndex = (rotationIndex + 1) % playlist.length;
-  activeType = item.type;
+  const item = objectives[rotationIndex % objectives.length];
+  rotationIndex = (rotationIndex + 1) % objectives.length;
   emptyEl.style.display = "none";
 
-  if (item.type === "objective") {
-    videoEl.pause();  // stop decoding while a text slide is up
-    videoEl.style.display = "none";
-    if (slideTextEl.textContent !== item.text) slideTextEl.textContent = item.text;
-    setSlideImage(item.image);
-    slideEl.style.display = "flex";
-    rotationTimer = setTimeout(showNextSlide, SLIDE_MS);
-    return;
-  }
+  if (slideTextEl.textContent !== item.text) slideTextEl.textContent = item.text;
+  setSlideImage(item.image);
+  slideEl.style.display = "flex";
 
-  slideEl.style.display = "none";
-  videoEl.style.display = "block";
-  // With a single item there is nothing to advance to, so let the element
-  // loop natively rather than re-fetching and re-decoding the same file
-  // every time it ends. Note this is also why "loop" is not hardcoded in
-  // index.html: with it always on, "ended" never fires and the rotation
-  // could never move past the first video.
-  videoEl.loop = playlist.length === 1;
-  videoEl.src = `/static/media/${item.file}`;
-  videoEl.play().catch(() => {});
+  // With a single objective the slide never changes, so don't wake the panel
+  // up every SLIDE_MS just to redraw the same thing.
+  if (objectives.length > 1) rotationTimer = setTimeout(showNextSlide, SLIDE_MS);
 }
 
 function restartRotation() {
-  rotationStarted = true;
   rotationIndex = 0;
   showNextSlide();
 }
-
-videoEl.addEventListener("ended", () => {
-  if (activeType !== "video" || videoEl.loop) return;
-  showNextSlide();
-});
-
-// A missing or undecodable file shouldn't strand the board on a black
-// panel. Wait before moving on so a playlist of entirely broken files
-// can't spin in a tight loop.
-videoEl.addEventListener("error", () => {
-  if (activeType !== "video") return;
-  console.error("media failed to play:", videoEl.currentSrc);
-  clearTimeout(rotationTimer);
-  rotationTimer = setTimeout(showNextSlide, VIDEO_ERROR_RETRY_MS);
-});
 
 // A missing or corrupt picture falls back to a text-only slide rather than
 // leaving a broken-image box on the board. dataset.file is cleared so the
 // next time this objective comes around it retries the load.
 slideImageEl.addEventListener("error", () => {
-  if (activeType !== "objective") return;
   console.error("objective image failed to load:", slideImageEl.currentSrc);
   slideImageEl.dataset.file = "";
   slideEl.classList.remove("has-image");
 });
+
+// --- background video ------------------------------------------------
+// The element and its scrim stay display:none until the first frame is
+// actually decodable, so a missing file or a slow first load never shows a
+// black rect behind the slides - and an unconfigured background costs
+// nothing at all, not even a compositing layer.
+bgVideoEl.addEventListener("loadeddata", () => document.body.classList.add("has-bg"));
+
+// No retry here, unlike a playlist: this is one hardcoded filename, so if it
+// fails once it will fail identically every time. Drop back to the flat panel
+// background and leave the reason in the console.
+bgVideoEl.addEventListener("error", () => {
+  console.error("background video failed to load:", bgVideoEl.currentSrc);
+  document.body.classList.remove("has-bg");
+});
+
+if (BACKGROUND_VIDEO) {
+  bgVideoEl.src = `/static/media/${BACKGROUND_VIDEO}`;
+}
 
 async function loadObjectives() {
   try {
@@ -322,13 +312,10 @@ async function loadObjectives() {
     restartRotation();
   } catch (e) {
     console.error("failed to load objectives", e);
-    // Objectives are unavailable, but any videos should still play.
-    if (!rotationStarted) restartRotation();
+    // Nothing to show yet; the panel keeps whatever is already up (on first
+    // load, that's the "add objectives" placeholder) and retries in 60s.
   }
 }
 
-// The rotation is started by the first loadObjectives() rather than here, so
-// a video slot never gets loaded and then immediately abandoned when the
-// objectives arrive a moment later.
 loadObjectives();
 setInterval(loadObjectives, 60000); // pick up edits to objectives.json without a restart

@@ -47,37 +47,76 @@ the routes/UI directly.
 
 ### Kiosk slide rotation
 
-The media panel cycles one combined playlist built by `buildPlaylist()`:
-every objective as a slide, then every file in `MEDIA_FILES` (a hardcoded
-array in `main.js` — there's no directory-listing endpoint, so filenames
-must be added there by hand after dropping them in `static/media/`). Slides
-advance on a `SLIDE_MS` timer; videos advance on the `ended` event.
+The media panel cycles the objectives from `config/objectives.json`, one
+full-panel slide at a time on a `SLIDE_MS` timer, drawn over an optional
+looping background video. **Videos used to be playlist items interspersed
+with the objectives; they aren't any more** (there is no `MEDIA_FILES` array
+and no `buildPlaylist()` — if you find code or docs referring to them,
+they're stale). There is exactly one video now and it is scenery.
 
-An objective in `config/objectives.json` is **either a plain string or
-`{text, image}`**, where `image` is a filename in `static/media/`;
-`normalizeObjective()` accepts both so hand-edited files that predate the
-image support keep working. A slide with a picture gets the `has-image`
-class, which switches it to a side-by-side layout — `setSlideImage()` only
-touches `src` when the filename actually changed, so an objective coming
-back around on the next rotation doesn't re-decode the same picture. A
-picture that fails to load drops back to a text-only slide (guarded on
-`activeType`, same stale-event reasoning as the video handlers).
+An objective is **either a plain string or `{text, image}`**, where `image`
+is a filename in `static/media/`; `normalizeObjective()` accepts both so
+hand-edited files that predate the image support keep working. A slide with
+a picture gets the `has-image` class, which switches it to a side-by-side
+layout — `setSlideImage()` only touches `src` when the filename actually
+changed, so an objective coming back around on the next rotation doesn't
+re-decode the same picture. A picture that fails to load drops back to a
+text-only slide and clears `dataset.file`, so the next rotation retries it.
 
-Three things here are easy to break:
+The background video is named by the `BACKGROUND_VIDEO` constant in
+`main.js` (empty string = none); there's no directory-listing endpoint, so
+it's set by hand after dropping the file in `static/media/`. Things worth
+knowing before changing it:
 
-- **Never put the `loop` attribute back on the `<video>` in
-  `index.html`.** With it always on, `ended` never fires and the rotation
-  can't move past the first video — that was a real bug. `main.js` sets
-  `videoEl.loop` per item instead, turning it on only when the playlist has
-  exactly one entry (nothing to advance to, so loop natively rather than
-  re-fetching the same file each time it ends).
-- **The video element's `ended`/`error` events can arrive after the
-  rotation has already moved on** (a 404 reports its error a beat late).
-  Both handlers check `activeType === "video"` first; without that guard a
-  stale error cuts the *next* text slide short.
-- **The rotation is started by the first `loadObjectives()`, not at script
-  load.** Starting earlier meant a video slot could begin fetching and then
-  be abandoned a moment later when the objectives arrived.
+- **The `loop` attribute on the `<video>` in `index.html` is correct now,
+  and must stay.** It was previously banned here for a real reason — back
+  when videos were playlist entries, `loop` meant `ended` never fired and
+  the rotation could never move past the first one. Nothing waits on
+  `ended` any more, so the element loops natively rather than re-fetching
+  the same file forever.
+- **`has-bg` goes on `<body>`, and is added on `loadeddata`, not when the
+  src is set.** The video and its scrim are `display: none` until a first
+  frame actually decodes, so a missing file or a slow load never shows a
+  black rect behind the slides, and an unconfigured background costs
+  nothing — not even a compositing layer. It sits on `<body>` rather than
+  `#media` because the toast and reading overlays are outside the panel and
+  branch on it too (below). The `error` handler removes the class again and
+  does *not* retry: it's one hardcoded filename, so a failure repeats
+  exactly.
+- **Slide text is kept readable with a flat `rgba()` scrim
+  (`.media__scrim`), never `backdrop-filter`.** Blurring live video every
+  frame is the single most expensive thing this hardware could be asked to
+  do — see Performance below.
+- **A single objective doesn't reschedule the timer.** With one slide
+  nothing ever changes, so `showNextSlide()` skips the `setTimeout` rather
+  than waking the panel every 12s to redraw identical content.
+
+### Overlays over the background video
+
+The toast and the "reading card" overlay are full-screen `position: fixed`
+layers. When a background video is configured they go translucent so it
+stays visible through the whole tap flow; with no video they stay fully
+opaque, which lets the compositor skip painting the board underneath
+entirely. That's why every rule is gated on `body.has-bg` rather than
+applied unconditionally — see Performance below.
+
+Three pieces have to move together, and missing any one of them looks
+broken rather than subtly wrong:
+
+- **`body.is-overlay`** is toggled by `syncOverlayState()`, which *derives*
+  the flag from whether either overlay currently has `is-visible`. It is
+  deliberately not two independent togglers: the two overlays overlap when
+  a tap completes and the toast replaces the reading overlay, and
+  independent toggles race there. Any new code path that shows or hides the
+  toast must go through `setToastVisible()`, not `classList` directly.
+- **`.media__scrim` is hidden while an overlay is up.** Stacking the
+  panel's 0.72 scrim under the overlay's 0.72 scrim leaves only ~8% of the
+  video coming through — visibly black, and the reason the effect looks
+  like it isn't working if this rule is dropped.
+- **`.slide` is hidden with `visibility`, not `display`.** `main.js` owns
+  the slide's inline `display`, so a `display` rule in the stylesheet loses
+  the specificity fight. Hiding it at all matters because the slide text
+  would otherwise ghost through behind the person's name.
 
 ## Performance (read before any UI change)
 
@@ -92,8 +131,9 @@ What was already removed for this reason (don't reintroduce it):
 - **`backdrop-filter` / `filter: blur()`** — the worst offender on this
   hardware. A full-screen blurred overlay makes the GPU re-read and blur
   everything beneath it every frame. The toast and reading overlays use a
-  fully opaque background instead, which also lets the compositor skip
-  painting what's behind them.
+  flat fill instead — opaque when there's no background video (the
+  compositor then skips painting what's behind them), a flat `rgba()` when
+  there is. Never a blur either way.
 - **Full-screen decorative overlays** — a `.scanlines` repeating-gradient
   layer sat over the whole screen and forced a compositing pass on every
   repaint underneath.
@@ -111,7 +151,7 @@ What was already removed for this reason (don't reintroduce it):
 - **`:has()` on `<body>`** — re-runs selector matching on every DOM
   mutation, and the roster re-renders on a timer. Toggle a class from JS.
 
-Two rules that matter for anything new:
+Rules that matter for anything new:
 
 - **Poll handlers must not touch the DOM when nothing changed.** Every
   render function compares a JSON snapshot of its data first and bails out
@@ -119,12 +159,15 @@ Two rules that matter for anything new:
   `lastClockText` / `loadObjectives._last` in `main.js`). Without that
   guard, `innerHTML` rebuilds relayout the section 40x a minute forever.
   Any new polled section needs the same guard.
-- **Screensaver video must be H.264 (AVC) and no wider than 1920px.**
+- **The background video must be H.264 (AVC) and no wider than 1920px.**
   Confirmed from `chrome://gpu` on the Pi: the only hardware decode profiles
   are h264 baseline/main/high, 32x32 to 1920x1920. HEVC/VP9/AV1, or anything
   above 1920px, falls back to software decode and will peg the CPU. 1080p
   H.264 is both the panel's native resolution and inside that ceiling, so
-  encode to exactly that.
+  encode to exactly that. It now loops **continuously**, not just during its
+  slot in a playlist, so it is the one thing on this board with a permanent
+  per-frame cost — keep it short, strip the audio track (`-an`; the kiosk
+  plays muted), and don't stack anything expensive on top of it.
 - **Objective slide pictures render at most ~780px wide** (`.slide__image`
   is capped at 45% of the slide's content box, which is ~1730px on a 1080p
   panel). ~800px wide is the right size; anything larger is decoded and

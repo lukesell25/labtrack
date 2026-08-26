@@ -2,9 +2,14 @@
   "_comment": "Edit this file any time to change what the screensaver cycles through. No restart needed - it's re-read every 60s. Each objective is either a plain string, or an object {\"text\": \"...\", \"image\": \"picture.png\"} to show a picture beside the text. Image files go in static/media/ and are named here by filename only; around 800px wide is plenty.",
   "lab_name": "Lab Status Board",
   "objectives": [
-    "Finalize Q3 experiment protocol",
-    "Calibrate sensor rig #2",
-    "Draft results for upcoming review",
-    "Onboard new simulation pipeline"
+    {"text": "Supporting ESCS Capstone Program"},
+    {"text": "Developing FAIR-LLM"},
+    {"text": "PhD research"},
+    {"text": "AMOS paper"},
+    {"text": "Managing compute resources"},
+    {"text": "Developing AI Tutor pilot program"},
+    {"text": "Practice test generator"},
+    {"text": "Nexus / Chromestar initiative"},
+    {"text": "Assessing the future of AI and data science"}
   ]
 }
