@@ -313,6 +313,21 @@ if (DEBUG_VIDEO) {
     "position:fixed;top:0;left:0;z-index:99;background:#000;color:#0f0;" +
     "font:13px ui-monospace,monospace;padding:8px 10px;white-space:pre;";
   document.body.appendChild(box);
+
+  // Media events say *why* playback stopped, which the numbers alone can't.
+  // "stalled" means the browser wants bytes and isn't getting them (network);
+  // "waiting" with a full buffer means the data is all here and the decoder
+  // stopped producing frames; "suspend" means the browser chose to stop
+  // fetching, which is normal once the whole file is in.
+  const log = [];
+  for (const name of ["waiting", "stalled", "suspend", "progress", "emptied",
+                      "abort", "ended", "error", "playing"]) {
+    bgVideoEl.addEventListener(name, () => {
+      log.unshift(`${bgVideoEl.currentTime.toFixed(2)} ${name}`);
+      log.length = Math.min(log.length, 6);
+    });
+  }
+
   let lastFrames = -1;
   let stalledFor = 0;
   setInterval(() => {
@@ -329,6 +344,10 @@ if (DEBUG_VIDEO) {
       `error    ${v.error ? v.error.code + " " + v.error.message : "-"}`,
       `buffered ${v.buffered.length ? v.buffered.end(v.buffered.length - 1).toFixed(1) : "-"}`,
       `has-bg   ${document.body.classList.contains("has-bg")}`,
+      `downloaded ${v.buffered.length && v.duration &&
+        v.buffered.end(v.buffered.length - 1) >= v.duration - 0.2 ? "FULL" : "partial"}`,
+      "events:",
+      ...log.map(l => "  " + l),
     ].join("\n");
   }, 1000);
 }
