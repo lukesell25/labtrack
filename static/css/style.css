@@ -71,6 +71,13 @@ body.kiosk.is-note-prompt {
   color: var(--amber);
 }
 
+/* Bigger on the kiosk, which is read from across the room; the dashboard keeps
+   the small eyebrow so it stays subordinate to the h1 under it. */
+.kiosk .board__eyebrow {
+  font-size: 1.6rem;
+  letter-spacing: 0.14em;
+}
+
 .reading-overlay {
   position: fixed;
   inset: 0;
