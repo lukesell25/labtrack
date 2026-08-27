@@ -191,21 +191,62 @@ optional looping background video.
   then set `BACKGROUND_VIDEO` near the bottom of `static/js/main.js` to its
   filename. It loops continuously behind every slide, with a flat dim over
   it so the text stays readable. Leave `BACKGROUND_VIDEO = ""` for no
-  background. Encode it as:
+  background.
+
+  **The last 5 seconds of the file never play.** `main.js` wraps playback
+  back to the start early, because letting it reach the end of the file
+  permanently wedges the Pi's hardware decoder (see below).
+
+  The trick that makes this free rather than lossy: **encode your loop, then
+  append a repeat of its own first 5 seconds.** Playback then shows exactly
+  your whole loop and wraps at its true loop point, and the appended 5s is
+  never seen — it exists only to keep the decoder away from end-of-stream.
+  `-stream_loop 1` plays the source twice and `-frames:v` cuts it to length:
 
   ```bash
-  ffmpeg -i source.mov -an -c:v libx264 -profile:v high -pix_fmt yuv420p \
-         -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080" \
-         -r 30 -b:v 4M -g 60 -movflags +faststart background.mp4
+  # source is a seamless 12s 1080p60 loop -> 17s output (12s visible + 5s tail)
+  # frames = (visible_seconds + 5) * 30    e.g. (12 + 5) * 30 = 510
+  ffmpeg -stream_loop 1 -i source.mp4 -an \
+         -vf "select='not(mod(n\,2))',setpts=N/30/TB" -frames:v 510 \
+         -c:v libx264 -preset slow -profile:v high -level:v 4.0 -crf 16 \
+         -maxrate 12M -bufsize 24M -pix_fmt yuv420p -r 30 -g 60 \
+         -movflags +faststart background.mp4
+  ```
+
+  `select='not(mod(n,2))'` takes every second frame to go 60→30fps. Use it
+  rather than plain `-r 30`, which picks frames with a drifting phase — that
+  makes the appended tail no longer line up with the start and puts a visible
+  jump at the wrap point. If your source is already 30fps, drop the `select`
+  and `setpts` filter entirely and just use `-frames:v`. If it needs
+  rescaling, add
+  `-vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080"`.
+
+  **Bitrate is the main quality lever, and 4 Mb/s is too low** for detailed
+  footage. Measured on the current clip against the source, one aligned
+  frame: 4 Mb/s scored 31.7 dB PSNR, 8 Mb/s 36.9 dB, 12 Mb/s 39.1 dB, 16 Mb/s
+  41.0 dB, 20 Mb/s 42.7 dB. There is no knee — it is a straight size/quality
+  trade, so pick by how much space you want to spend. 12 Mb/s (~25 MB for
+  17s) is the shipped setting. **Stay at `-level:v 4.0`**, which is what the
+  Pi is known to decode here; above ~20 Mb/s x264 will need level 4.2, which
+  is untested on this hardware.
+
+  To check a loop is seamless before encoding, compare its last frame to its
+  first and to a neighbour — if last-vs-first is about the same as
+  one-frame-vs-next, it loops cleanly:
+
+  ```bash
+  ffmpeg -i src.mp4 -vf "select=eq(n\,0)"   -vframes 1 f0.png
+  ffmpeg -i src.mp4 -vf "select=eq(n\,1)"   -vframes 1 f1.png
+  ffmpeg -i src.mp4 -vf "select=eq(n\,719)" -vframes 1 flast.png   # last frame
+  ffmpeg -i flast.png -i f0.png -lavfi psnr -f null -   # the loop seam
+  ffmpeg -i f1.png    -i f0.png -lavfi psnr -f null -   # one frame of motion
   ```
 
   **`-movflags +faststart` is not optional.** Without it ffmpeg writes the
   `moov` index at the *end* of the file, forcing Chromium to fetch the tail
-  with a separate range request before it can play anything. On the Pi that
-  fetch pattern stalls partway through: the video plays a few seconds and
-  then freezes, `readyState` drops to 2 (starved of data) with no error
-  code, and the rest of the board keeps working normally. Fix an existing
-  file without re-encoding it:
+  with a separate range request before it can play anything — so the board
+  shows nothing until the whole tail arrives. Fix an existing file without
+  re-encoding it:
 
   ```bash
   ffmpeg -i background.mp4 -c copy -movflags +faststart fixed.mp4
@@ -216,6 +257,21 @@ optional looping background video.
   ```bash
   grep -abo moov background.mp4 | head -1
   ```
+
+  **If the video freezes a few seconds in and never recovers**, with the
+  clock and check-ins still working, the cause is almost certainly *not* the
+  file. Chromium drains the hardware decoder as playback approaches the end
+  of the stream, and the Pi's `bcm2835-codec` V4L2 drain never completes —
+  the picture stops with no error code and `readyState` drops from 4 to 2.
+  It reproduces on any clip, at any resolution, bitrate or profile, always
+  at `duration` minus ~3.2s. That is exactly what the early wrap-around in
+  `main.js` exists to avoid, so before re-encoding anything, check that the
+  `<video>` in `templates/index.html` still has **no `loop` attribute** and
+  that `LOOP_TAIL_S` is still comfortably larger than 3.3. To confirm the
+  decoder is the culprit rather than the file, launch Chromium by hand with
+  `--disable-accelerated-video-decode` — the same file will then loop
+  forever, at the cost of far more CPU than the kiosk can spare in
+  production.
 
   The video also stays visible behind the check-in/check-out confirmation
   and the "reading card" overlay, dimmed to the same level as behind a

@@ -15,10 +15,11 @@
     </header>
 
     <section class="media" id="media">
-      <!-- Looping background behind every slide. "loop" belongs here now: this
-           video is scenery, not a playlist entry, so nothing waits on "ended".
+      <!-- Looping background behind every slide. No "loop" attribute: main.js
+           wraps back to the start early instead, because reaching end-of-stream
+           permanently wedges the Pi's hardware decoder (see LOOP_TAIL_S).
            It stays hidden until main.js confirms a file is configured. -->
-      <video class="media__bg" id="media-bg" autoplay muted playsinline loop></video>
+      <video class="media__bg" id="media-bg" autoplay muted playsinline></video>
       <div class="media__scrim"></div>
       <div class="slide" id="media-slide">
         <img class="slide__image" id="slide-image" alt="" decoding="async">

@@ -207,8 +207,19 @@ poll();
 // empty ("") for no background - the panel then just uses its flat card
 // colour. There is deliberately no directory-listing endpoint, so name the
 // file here by hand after dropping it in. It must be H.264 and no wider than
-// 1920px, or the Pi decodes it in software (README step 7).
+// 1920px, or the Pi decodes it in software (README step 7). Note that its
+// last LOOP_TAIL_S seconds never play - see the wrap-around below.
 const BACKGROUND_VIDEO = "background.mp4";
+
+// Seconds of the clip held back from ever playing, so end-of-stream is never
+// reached. The Pi's V4L2 hardware decoder (bcm2835-codec) wedges on the
+// end-of-stream drain: Chromium stops feeding it, the drain never completes,
+// and the ~3.2s of frames still in flight never come out. The picture freezes
+// with no error, readyState drops to 2, and it never recovers - so the native
+// `loop` attribute is unusable here. Measured on real hardware across six
+// clips of three different durations, contents, resolutions and bitrates:
+// every one froze at duration - 3.1 to 3.3s. 5s leaves ~1.7s of margin.
+const LOOP_TAIL_S = 5;
 
 const SLIDE_MS = 12000;            // how long one objective slide stays up
 
@@ -295,61 +306,24 @@ bgVideoEl.addEventListener("error", () => {
   document.body.classList.remove("has-bg");
 });
 
+// Loop by hand, wrapping back to the start before the decoder is ever asked
+// to drain. `timeupdate` fires ~4x/second, which is plenty of resolution
+// against a 1.7s margin and far cheaper than a rAF loop.
+bgVideoEl.addEventListener("timeupdate", () => {
+  const wrapAt = bgVideoEl.duration - LOOP_TAIL_S;
+  if (wrapAt > 0 && bgVideoEl.currentTime > wrapAt) bgVideoEl.currentTime = 0;
+});
+
+bgVideoEl.addEventListener("loadedmetadata", () => {
+  if (bgVideoEl.duration <= LOOP_TAIL_S) {
+    console.error(
+      `background video is only ${bgVideoEl.duration.toFixed(1)}s; it must be ` +
+      `longer than ${LOOP_TAIL_S}s or it will freeze on the Pi (README step 7)`);
+  }
+});
+
 if (BACKGROUND_VIDEO) {
   bgVideoEl.src = `/static/media/${BACKGROUND_VIDEO}`;
-}
-
-// --- TEMPORARY: on-screen video diagnostics -------------------------
-// Flip to true, restart the kiosk, and read the box in the top-left corner.
-// The line that matters is "frames": if it keeps climbing while the picture
-// is frozen, the decoder is fine and the problem is compositing; if it stops
-// climbing, the decode pipeline itself stalled. Delete this block once the
-// background-video freeze on the Pi is diagnosed.
-const DEBUG_VIDEO = false;
-
-if (DEBUG_VIDEO) {
-  const box = document.createElement("div");
-  box.style.cssText =
-    "position:fixed;top:0;left:0;z-index:99;background:#000;color:#0f0;" +
-    "font:13px ui-monospace,monospace;padding:8px 10px;white-space:pre;";
-  document.body.appendChild(box);
-
-  // Media events say *why* playback stopped, which the numbers alone can't.
-  // "stalled" means the browser wants bytes and isn't getting them (network);
-  // "waiting" with a full buffer means the data is all here and the decoder
-  // stopped producing frames; "suspend" means the browser chose to stop
-  // fetching, which is normal once the whole file is in.
-  const log = [];
-  for (const name of ["waiting", "stalled", "suspend", "progress", "emptied",
-                      "abort", "ended", "error", "playing"]) {
-    bgVideoEl.addEventListener(name, () => {
-      log.unshift(`${bgVideoEl.currentTime.toFixed(2)} ${name}`);
-      log.length = Math.min(log.length, 6);
-    });
-  }
-
-  let lastFrames = -1;
-  let stalledFor = 0;
-  setInterval(() => {
-    const v = bgVideoEl;
-    const q = v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : null;
-    const frames = q ? q.totalVideoFrames : -1;
-    stalledFor = frames === lastFrames ? stalledFor + 1 : 0;
-    lastFrames = frames;
-    box.textContent = [
-      `t        ${v.currentTime.toFixed(2)} / ${(v.duration || 0).toFixed(2)}`,
-      `frames   ${frames}   dropped ${q ? q.droppedVideoFrames : "?"}`,
-      `stalled  ${stalledFor}s`,
-      `ready    ${v.readyState}   net ${v.networkState}   paused ${v.paused}`,
-      `error    ${v.error ? v.error.code + " " + v.error.message : "-"}`,
-      `buffered ${v.buffered.length ? v.buffered.end(v.buffered.length - 1).toFixed(1) : "-"}`,
-      `has-bg   ${document.body.classList.contains("has-bg")}`,
-      `downloaded ${v.buffered.length && v.duration &&
-        v.buffered.end(v.buffered.length - 1) >= v.duration - 0.2 ? "FULL" : "partial"}`,
-      "events:",
-      ...log.map(l => "  " + l),
-    ].join("\n");
-  }, 1000);
 }
 
 async function loadObjectives() {

@@ -68,12 +68,22 @@ The background video is named by the `BACKGROUND_VIDEO` constant in
 it's set by hand after dropping the file in `static/media/`. Things worth
 knowing before changing it:
 
-- **The `loop` attribute on the `<video>` in `index.html` is correct now,
-  and must stay.** It was previously banned here for a real reason — back
-  when videos were playlist entries, `loop` meant `ended` never fired and
-  the rotation could never move past the first one. Nothing waits on
-  `ended` any more, so the element loops natively rather than re-fetching
-  the same file forever.
+- **The `<video>` must not carry a `loop` attribute, and playback must
+  never be allowed to reach the end of the file.** `main.js` loops it by
+  hand: a `timeupdate` handler seeks back to 0 once `currentTime` passes
+  `duration - LOOP_TAIL_S` (5s). This is not a style choice — reaching
+  end-of-stream permanently wedges the Pi's hardware decoder. See
+  Performance below for the measurements. The last 5s of the file
+  therefore never play; the shipped `background.mp4` handles that by being
+  a seamless 12s loop with a repeat of its own first 5s appended, so the
+  visible portion is the whole loop and the wrap lands exactly on the
+  source's loop point (measured: the seam is 26.8dB against 27.0dB for an
+  ordinary 30fps frame step, i.e. indistinguishable). README step 7 has the
+  encode. Keep any replacement comfortably longer than 5s — `main.js` logs
+  an error if it isn't. Two separate reasons have now banned `loop` here —
+  the older one was that back when videos were playlist entries, `loop`
+  meant `ended` never fired and the rotation could never advance. That
+  reason is gone; this one is not.
 - **`has-bg` goes on `<body>`, and is added on `loadeddata`, not when the
   src is set.** The video and its scrim are `display: none` until a first
   frame actually decodes, so a missing file or a slow load never shows a
@@ -178,6 +188,21 @@ Rules that matter for anything new:
   slot in a playlist, so it is the one thing on this board with a permanent
   per-frame cost — keep it short, strip the audio track (`-an`; the kiosk
   plays muted), and don't stack anything expensive on top of it.
+- **The background video must never be played to its end.** Chromium drains
+  the hardware decoder at end-of-stream, and the Pi's `bcm2835-codec` V4L2
+  drain never completes: it stops returning frames, the picture freezes with
+  **no error code**, `readyState` drops from 4 to 2, and it never recovers.
+  Because nothing errors, the `error` fallback never fires and the board sits
+  on a dead frame forever. Confirmed on real hardware across six clips —
+  12.07s, 9.07s and 30.0s durations; the lab footage and a synthetic
+  `testsrc2` pattern; 1080p and 720p; 4.1 and 1.2 Mb/s; High, Main and
+  Baseline profiles; with and without B-frames. **Every one froze at
+  `duration` minus 3.1–3.3s**, i.e. as decode approached EOS, and nothing
+  about the frames at that point was unusual. Two things isolate it: the
+  same files play indefinitely under `--disable-accelerated-video-decode`
+  (software decode has no drain path), and wrapping back to 0 before EOS
+  loops forever with hardware decode on. Hence `LOOP_TAIL_S` in `main.js`.
+  Don't "simplify" that back into a `loop` attribute.
 - **Objective slide pictures render at most ~780px wide** (`.slide__image`
   is capped at 45% of the slide's content box, which is ~1730px on a 1080p
   panel). ~800px wide is the right size; anything larger is decoded and
