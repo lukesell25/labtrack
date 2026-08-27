@@ -65,8 +65,13 @@ text-only slide and clears `dataset.file`, so the next rotation retries it.
 
 The background video is named by the `BACKGROUND_VIDEO` constant in
 `main.js` (empty string = none); there's no directory-listing endpoint, so
-it's set by hand after dropping the file in `static/media/`. Things worth
-knowing before changing it:
+it's set by hand after dropping the file in `static/media/`. Only
+`background.mp4` itself is tracked in git — `.gitignore` excludes every
+other video in that directory, because encode experiments and multi-MB
+sources are permanent once committed (the repo's history had to be
+rewritten once already to get 131MB of them back out). Keep sources
+elsewhere, or let the ignore rule do its job. Things worth knowing before
+changing the video:
 
 - **The `<video>` must not carry a `loop` attribute, and playback must
   never be allowed to reach the end of the file.** `main.js` loops it by
@@ -184,10 +189,16 @@ Rules that matter for anything new:
   are h264 baseline/main/high, 32x32 to 1920x1920. HEVC/VP9/AV1, or anything
   above 1920px, falls back to software decode and will peg the CPU. 1080p
   H.264 is both the panel's native resolution and inside that ceiling, so
-  encode to exactly that. It now loops **continuously**, not just during its
-  slot in a playlist, so it is the one thing on this board with a permanent
-  per-frame cost — keep it short, strip the audio track (`-an`; the kiosk
-  plays muted), and don't stack anything expensive on top of it.
+  encode to exactly that, at `-level:v 4.0`. It now loops **continuously**,
+  not just during its slot in a playlist, so it is the one thing on this
+  board with a permanent per-frame cost: hold it to 30fps, strip the audio
+  track (`-an`; the kiosk plays muted), and don't stack anything expensive
+  on top of it. Duration is *not* the thing to minimise — it costs nothing
+  per frame, and the file must be longer than `LOOP_TAIL_S` anyway. Bitrate
+  is a straight size/quality trade with no measured decode penalty: the
+  shipped clip is 12.4 Mb/s at level 4.0 and verified on the Pi, up from
+  4.1 Mb/s, which was visibly soft. Above ~20 Mb/s x264 needs level 4.2,
+  which is untested on this hardware.
 - **The background video must never be played to its end.** Chromium drains
   the hardware decoder at end-of-stream, and the Pi's `bcm2835-codec` V4L2
   drain never completes: it stops returning frames, the picture freezes with

@@ -193,6 +193,13 @@ optional looping background video.
   it so the text stays readable. Leave `BACKGROUND_VIDEO = ""` for no
   background.
 
+  Only `background.mp4` is tracked in git; `.gitignore` excludes every other
+  video in `static/media/`. Keep your source footage and any encode
+  experiments outside the repo or under those ignore rules — committed
+  binaries are permanent, and this history already had to be rewritten once
+  to remove 131MB of them. The Pi picks the video up through `git pull`
+  along with everything else.
+
   **The last 5 seconds of the file never play.** `main.js` wraps playback
   back to the start early, because letting it reach the end of the file
   permanently wedges the Pi's hardware decoder (see below).
