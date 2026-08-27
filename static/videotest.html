@@ -36,6 +36,10 @@
 // Isolation test for the background-video freeze on the Pi.
 //   /static/videotest.html            video alone, nothing composited over it
 //   /static/videotest.html?scrim=1    same video with the kiosk's scrim + text on top
+//   /static/videotest.html?earlyloop=5 drop the loop attribute and seek back to 0
+//                                     five seconds early, so end-of-stream is never
+//                                     reached and the decoder is never drained
+//   /static/videotest.html?noloop=1   drop the loop attribute, let it run to the end
 // Everything else from the kiosk page (polling, roster, slide rotation,
 // objectives) is deliberately absent, so a freeze here means the cause is
 // the video path itself rather than anything the board does around it.
@@ -45,6 +49,23 @@ if (withScrim) document.body.classList.add("scrim");
 
 const v = document.getElementById("v");
 const hud = document.getElementById("hud");
+
+// Seconds of headroom to leave before the end of the clip. The Pi's V4L2
+// decoder wedges on the end-of-stream drain, so the point of this mode is to
+// wrap around before Chromium ever asks it to drain.
+const earlyLoop = params.has("earlyloop") ? parseFloat(params.get("earlyloop")) : 0;
+if (earlyLoop || params.has("noloop")) v.removeAttribute("loop");
+
+let loops = 0;
+if (earlyLoop) {
+  v.addEventListener("timeupdate", () => {
+    if (v.duration && v.currentTime > v.duration - earlyLoop) {
+      loops++;
+      v.currentTime = 0;
+    }
+  });
+}
+
 v.src = "/static/media/" + (params.get("file") || "background.mp4");
 
 const log = [];
@@ -64,7 +85,10 @@ setInterval(() => {
   maxTime = Math.max(maxTime, v.currentTime);
   const buf = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0;
   hud.textContent = [
-    "mode     " + (withScrim ? "WITH scrim + text" : "video ALONE"),
+    "mode     " + (withScrim ? "WITH scrim + text" : "video ALONE") +
+      (earlyLoop ? "  earlyloop " + earlyLoop + "s" : "") +
+      (params.has("noloop") ? "  NO loop" : ""),
+    "wraps    " + loops,
     "t        " + v.currentTime.toFixed(2) + " / " + (v.duration || 0).toFixed(2),
     "furthest " + maxTime.toFixed(2),
     "frames   " + frames + "   dropped " + (q ? q.droppedVideoFrames : "?"),
