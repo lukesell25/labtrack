@@ -228,6 +228,7 @@ const slideEl = document.getElementById("media-slide");
 const slideTextEl = document.getElementById("slide-text");
 const slideImageEl = document.getElementById("slide-image");
 const emptyEl = document.getElementById("media-empty");
+const labelEl = document.getElementById("media-label");
 
 let objectives = [];
 let rotationIndex = 0;
@@ -260,6 +261,7 @@ function showNextSlide() {
 
   if (objectives.length === 0) {
     slideEl.style.display = "none";
+    labelEl.style.display = "none";   // no slides to head up
     emptyEl.style.display = "block";
     return;
   }
@@ -271,6 +273,7 @@ function showNextSlide() {
   if (slideTextEl.textContent !== item.text) slideTextEl.textContent = item.text;
   setSlideImage(item.image);
   slideEl.style.display = "flex";
+  labelEl.style.display = "block";
 
   // With a single objective the slide never changes, so don't wake the panel
   // up every SLIDE_MS just to redraw the same thing.

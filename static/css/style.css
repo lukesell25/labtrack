@@ -176,7 +176,10 @@ body.has-bg .media__scrim {
   gap: 1.25rem;
   width: 100%;
   height: 100%;
-  padding: 3rem;
+  /* Extra padding at the bottom clears .media__label, which is pinned over the
+     panel rather than sitting in flow: the slide then centres its content in
+     the space left above the label instead of running under it. */
+  padding: 3rem 3rem 5.5rem;
   text-align: center;
 }
 
@@ -214,10 +217,23 @@ body.has-bg .media__scrim {
   align-items: flex-start;
 }
 
-.slide__label {
+/* Pinned to the bottom-right of the media panel so it lands in the same place
+   on every slide, whatever the slide's own layout is doing. Absolute rather
+   than in flow because .media centres a full-size .slide and an in-flow
+   sibling would fight that; it costs no compositing layer of its own. The
+   bottom-right corner is deliberate: under the board header it read as a
+   subtitle to it, and bottom-left would look like a caption for the picture
+   on has-image slides. */
+.media__label {
+  display: none;   /* main.js shows it with the first slide */
+  position: absolute;
+  bottom: 2.5rem;
+  left: 3rem;
+  right: 3rem;
+  text-align: right;
   font-family: var(--mono);
-  font-size: 0.8rem;
-  letter-spacing: 0.18em;
+  font-size: 1.15rem;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--amber);
 }
@@ -443,7 +459,8 @@ body.has-bg.is-overlay .media__scrim {
   display: none;
 }
 
-body.has-bg.is-overlay .slide {
+body.has-bg.is-overlay .slide,
+body.has-bg.is-overlay .media__label {
   visibility: hidden;
 }
 

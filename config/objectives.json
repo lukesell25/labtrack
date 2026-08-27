@@ -2,14 +2,11 @@
   "_comment": "Edit this file any time to change what the screensaver cycles through. No restart needed - it's re-read every 60s. Each objective is either a plain string, or an object {\"text\": \"...\", \"image\": \"picture.png\"} to show a picture beside the text. Image files go in static/media/ and are named here by filename only; around 800px wide is plenty.",
   "lab_name": "Lab Status Board",
   "objectives": [
-    {"text": "Supporting ESCS Capstone Program"},
-    {"text": "Developing FAIR-LLM"},
-    {"text": "PhD research"},
-    {"text": "AMOS paper"},
-    {"text": "Managing compute resources"},
-    {"text": "Developing AI Tutor pilot program"},
-    {"text": "Practice test generator"},
-    {"text": "Nexus / Chromestar initiative"},
-    {"text": "Assessing the future of AI and data science"}
+    {"text": "Mentoring cadets in the ESCS Capstone Program, providing technical support and subject matter expertise", "image": "drone_cadet.jpg"},
+    {"text": "Developing FAIR-LLM, a Python framework designed to accelerate the development of powerful, consistent, and modular agentic AI applications", "image": "agentic_workflow.jpg"},
+    {"text": "Managing and delivering compute resources to cadets and faculty to power USAFA research initatives - 6 servers with over 30 high-performance GPUs", "image": "gpu_server.jpg"},
+    {"text": "Using FAIR-LLM to develop strict AI tutors that are designed to help cadets learn course material, rather than just giving them the correct answers", "image": "ai_tutor.jpg"},
+    {"text": "CHROME STAR: a living, evolving, Multi-Domain warfighting simulation that accelerates cadet leadership through forced, high-stakes decision-making", "image": "warfighting_sim.jpg"},
+    {"text": "Assessing the future of AI and data science by testing new models, frameworks, and methodologies", "image": "the_future.jpeg"}
   ]
 }
