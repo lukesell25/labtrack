@@ -277,6 +277,17 @@ body.has-bg .media__scrim {
   gap: 1rem;
 }
 
+/* The strip is sized by its tallest card, and a card grows a third line only
+   when that member is out *with* a checkout note - so without this the whole
+   bottom bar silently changed height (88px vs 108px at 1080p) as people came
+   and went, which reads as the board having shrunk. Pin it to the taller of
+   the two so the layout is stable whatever the roster data happens to be.
+   Kiosk only: the dashboard lays the same cards out in a multi-row grid
+   where a fixed floor would just add dead space. */
+.kiosk .roster__card {
+  min-height: 6.75rem;
+}
+
 .roster__ring {
   width: 18px;
   height: 18px;
