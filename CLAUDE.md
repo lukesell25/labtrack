@@ -340,8 +340,15 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     nothing to another, so losing it means re-adding every member. Because
     a *generated* key is normal on a first run and a catastrophe on an
     existing one, `_warn_if_roster_key_lost()` logs an ERROR when it sees a
-    fresh key alongside already-hashed rows — the failure is otherwise
-    silent, every card simply stopping working at once.
+    fresh key alongside hashes it can't have made — the failure is otherwise
+    silent, every card simply stopping working at once. It checks two
+    places, because they catch different halves of the same mistake:
+    already-hashed rows in `members` (the key was lost on a running
+    install), and already-hashed entries in `config/members.json` (a fresh
+    clone, where there are no rows to compare against yet and the roster
+    arrived from git carrying another machine's hashes). The key is
+    gitignored, so a clone never brings it along — that second case is the
+    normal way to get this wrong.
 - **`database.py`** — all SQLite access goes through `get_conn()`, which
   keeps one connection per thread (`threading.local`) since sqlite3
   connections aren't safe to share across threads; this matters because the

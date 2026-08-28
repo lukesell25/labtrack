@@ -127,10 +127,14 @@ def _warn_if_roster_key_lost():
     automatically - the point is only that it says so rather than presenting
     as an empty lab. Rows still holding plaintext don't count: those are a
     pre-hashing install being upgraded, which is the normal path.
+
+    Two shapes of the same mistake, because a fresh clone has no rows yet:
+    hashes already in the database, and hashes already in members.json.
     """
     identity.load_key()
     if not identity.key_was_generated:
         return
+
     conn = get_conn()
     hashed = [
         r for r in conn.execute("SELECT edipi_hash FROM members")
@@ -143,6 +147,31 @@ def _warn_if_roster_key_lost():
             "Restore the old key file from backup, or re-add everyone with "
             "scripts/add-member.py.",
             len(hashed),
+            identity.KEY_PATH,
+        )
+        return
+
+    # A fresh install has no rows to compare a new key against, so the check
+    # above sees nothing - but config/members.json arrives from git already
+    # full of hashes made on whatever machine those people were added on, and
+    # a key generated here cannot reproduce them. That combination is the
+    # quietest failure this system has: the roster syncs, the board shows
+    # everyone, and every single tap comes back "Card not recognized".
+    try:
+        entries = json.loads(MEMBERS_CONFIG.read_text()).get("members", [])
+    except (OSError, ValueError):
+        return  # a missing or unparseable roster is sync's problem, not this one
+    prehashed = [m for m in entries if m.get("edipi_hash")]
+    if prehashed:
+        log.error(
+            "%s lists %d member(s) already hashed, but the roster key at %s was "
+            "just generated here - it cannot match hashes made elsewhere, so the "
+            "board will look right and no card will be recognised. Copy over the "
+            "key those hashes were made with (it is gitignored, so it never "
+            "arrives with a clone), or re-add everyone with "
+            "scripts/add-member.py.",
+            MEMBERS_CONFIG,
+            len(prehashed),
             identity.KEY_PATH,
         )
 

@@ -128,9 +128,22 @@ quietly failing:
 ERROR labtrack.db: 5 member(s) were hashed with a different roster key than the one at ...
 ```
 
-The key never leaves the machine it was made on, so a dev box generates its
-own and gets its own throwaway roster — don't expect hashes to be portable
-between the two, and don't copy the Pi's key onto a laptop to make them.
+The same applies to a **fresh clone**: `config/members.json` comes down from
+git already full of hashes, but the key that made them is gitignored and does
+not. Copy the key into `config/` *before* the app first starts, or you get the
+quietest failure this system has — the roster syncs, the board shows everyone,
+and every tap comes back "Card not recognized". Startup says so:
+
+```
+ERROR labtrack.db: config/members.json lists 5 member(s) already hashed, but the roster key at ... was just generated here
+```
+
+**Which machine owns the key.** Whichever one the roster was built on holds
+the key those hashes belong to, and the Pi needs that same file to recognise
+those cards — copying it across once, as part of deploying, is the intended
+path. Keeping the production key on a laptop afterwards is not: a dev machine
+away from the Pi should generate its own key and hash a throwaway roster of
+made-up numbers. Hashes are not portable between the two.
 
 **Adding and removing people.** The file is the source of truth: anyone added
 appears on the board after a restart, and anyone removed disappears from the
