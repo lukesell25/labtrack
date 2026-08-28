@@ -334,6 +334,19 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `PRAGMA table_info` and `ALTER TABLE`s if missing — see
     `_migrate_add_note_column()` for the pattern. It must be idempotent;
     it runs on every startup.
+- **Kiosk timestamps** — `fmtTime()` in `main.js` prints just the time for
+  something that happened today, and prepends the date when it didn't, so
+  yesterday's 5:00 PM checkout can't be misread as this evening's by someone
+  walking in the next morning. Two things it depends on. The day is compared
+  with **local** date parts, never an ISO/UTC slice — after ~5pm Mountain the
+  UTC date is already tomorrow, which would stamp a date on every evening
+  checkout. And `renderRoster`'s change-detection key includes today's date,
+  because the board can sit for days with no roster change and would
+  otherwise carry yesterday's date-less rendering straight through midnight,
+  failing in exactly the case the date exists for. The status line is sized
+  at 1rem rather than 1.1rem to fit the longer date form on a six-card strip.
+  `dashboard.js`'s `fmtDateTime()` is separate and always shows the date:
+  it's a log read from a foot away, not a glance from across the room.
 - **Checkout notes** — an optional "why are you out" comment, threaded
   through several layers: `toggle_checkin()` returns `checkin_event_id`
   (the new row's id) → `_push_event()` puts it on `_last_event` → the kiosk
@@ -353,7 +366,9 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   restarts the rotation from the first slide.
 - **Frontend** (`templates/` + `static/js/`) — no build step, no framework;
   plain JS polling JSON endpoints. Every render function is guarded by a
-  change check (see Performance above) — the polls are frequent, the data
+  change check (see Performance above; `renderRoster`'s key folds in today's
+  date, because what a timestamp prints depends on it — see Kiosk timestamps
+  below) — the polls are frequent, the data
   almost never changes. `main.js` drives the kiosk
   (`templates/index.html`): polls `/api/state` every `POLL_MS` (1.5s) to show
   toast confirmations and the "reading card..." overlay, drives the slide

@@ -64,10 +64,26 @@ window.addEventListener("unhandledrejection", (e) => {
   report("unhandled-rejection", String(e.reason));
 });
 
+// Local calendar day, as a comparable string. Built from the date parts
+// rather than an ISO slice because toISOString() is UTC - after 5pm Mountain
+// that reports tomorrow, which would put a date on every evening checkout.
+function dayKey(d) {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+// Timestamps from today show just the time. Older ones carry their date, so
+// yesterday's 5:00 PM checkout can't be read as "this evening" by someone
+// walking in the next morning. Deliberately a date rather than "yesterday":
+// it stays correct over a weekend or a holiday, and needs no arithmetic to
+// interpret from across the room.
 function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // "5:00 PM", not "05:00 PM" - the padding zero buys nothing and the date
+  // form below is tight on width at a full roster (see .roster__status).
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  if (dayKey(d) === dayKey(new Date())) return time;
+  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
 }
 
 function escapeHtml(str) {
@@ -88,7 +104,14 @@ renderClock();
 
 let lastRosterJson = "";
 function renderRoster(roster) {
-  const json = JSON.stringify(roster);
+  // Today's date is part of the cache key, not just the roster data: what
+  // fmtTime() prints depends on it, so at midnight every "5:00 PM" on the
+  // board has to gain a date. The kiosk can sit for days without the roster
+  // changing, and without this the strip would keep yesterday's date-less
+  // rendering until the next tap - which is precisely the morning-after case
+  // this is for. The key changes once a day and costs a string compare that
+  // was happening anyway.
+  const json = JSON.stringify([dayKey(new Date()), roster]);
   if (json === lastRosterJson) return;
   lastRosterJson = json;
 

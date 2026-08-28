@@ -321,7 +321,12 @@ body.has-bg .media__scrim {
 }
 
 .kiosk .roster__status {
-  font-size: 1.1rem;
+  /* 1rem rather than the 1.1rem the rest of this scale would suggest: this
+     line carries a date as well as a time whenever the last tap wasn't today
+     ("OUT · AUG 27, 5:00 PM"), and at 1.1rem that string clips on a six-card
+     strip - exactly the morning-after case the date exists for. Measured at
+     1080p: 1rem fits six cards, 1.1rem fits five. */
+  font-size: 1rem;
   /* The name and the note are both nowrap+ellipsis; this line was not, which
      made it the one piece of a card that could still wrap to a second line
      once the cards got narrow - silently adding ~20px to every card and
