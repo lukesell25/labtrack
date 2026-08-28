@@ -165,22 +165,34 @@ def get_roster_status():
     members = conn.execute(
         "SELECT * FROM members WHERE active = 1 ORDER BY display_name"
     ).fetchall()
-    result = []
+    rows = []
     for m in members:
         last = _last_event_for_member(conn, m["id"])
         status = last["action"] if last else "out"
-        result.append(
-            {
-                "id": m["id"],
-                "display_name": m["display_name"],
-                "status": status,
-                "since": last["timestamp"] if last else None,
-                # Only surface the note while they're actually out - it's tied
-                # to that specific checkout, not a persistent profile field.
-                "note": last["note"] if (last and status == "out") else None,
-            }
+        rows.append(
+            (
+                last,
+                {
+                    "id": m["id"],
+                    "display_name": m["display_name"],
+                    "status": status,
+                    "since": last["timestamp"] if last else None,
+                    # Only surface the note while they're actually out - it's tied
+                    # to that specific checkout, not a persistent profile field.
+                    "note": last["note"] if (last and status == "out") else None,
+                },
+            )
         )
-    return result
+
+    # Most recently active member first, so the newest check-in/out lands
+    # leftmost on the board. Timestamps are ISO strings, so they sort
+    # chronologically as text; the event id breaks ties within a second.
+    # Members who have never tapped sort last and, since sort() keeps the
+    # order of equal keys even when reversed, stay alphabetical among
+    # themselves (the SELECT above is ordered by display_name).
+    rows.sort(key=lambda r: (r[0]["timestamp"], r[0]["id"]) if r[0] else ("", 0),
+              reverse=True)
+    return [entry for _, entry in rows]
 
 
 def get_recent_events(limit: int = 50):

@@ -2,7 +2,7 @@
   "_comment": "Fill in each lab member's EDIPI (the 10-digit DoD ID number printed on the front of the CAC, also embedded in the PIV certificate). display_name is what shows on the kiosk and dashboard.",
   "members": [
     { "edipi": "0000000000", "display_name": "Luke Sellmayer" },
-    { "edipi": "1000000002", "display_name": "Member Two" },
+    { "edipi": "0000000001", "display_name": "Drew Gibson" },
     { "edipi": "1000000003", "display_name": "Member Three" },
     { "edipi": "1000000004", "display_name": "Member Four" },
     { "edipi": "1000000005", "display_name": "Member Five" }
