@@ -10,3 +10,7 @@ static/media/*.mov
 static/media/*.mkv
 static/media/*.webm
 !static/media/background.mp4
+
+# The roster hashing key. Losing it means no card matches; leaking it
+# alongside config/members.json is the one thing that weakens the hashes.
+config/roster.key

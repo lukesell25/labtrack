@@ -70,7 +70,9 @@ sudo raspi-config nonint do_boot_behavior B4
 
 echo ""
 echo "Setup complete. Next steps:"
-echo "  1. Edit config/members.json with each lab member's real EDIPI."
+echo "  1. Add each lab member:  python3 scripts/add-member.py \"Their Name\""
+echo "     (it asks for the EDIPI and stores only a hash of it)"
+echo "     Then back up config/roster.key off the Pi - without it no card matches."
 echo "  2. Plug in the USB smart card reader, then run: pcsc_scan"
 echo "     (tap a CAC and confirm the reader + card are detected before trusting the app)"
 echo "  3. Reboot: sudo reboot"

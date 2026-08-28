@@ -323,16 +323,35 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   silence look wrong, so a week-long run can be reviewed with `journalctl -p
   warning`. Also served on demand at `/api/health`, and summarised across a
   whole run by `scripts/soak-report.sh`.
+- **`identity.py`** — the only module that knows how an EDIPI becomes a
+  hash. Nothing stores the number: `config/members.json` and `members.edipi_hash`
+  hold `hash_edipi(edipi)`, and `_handle_tap()` identifies a card by hashing
+  what it read and matching that. `scrypt`, not SHA-256 or HMAC — the EDIPI
+  keyspace is 10^10, small enough that a plain hash falls to a GPU in minutes
+  and an HMAC does too the moment `config/roster.key` leaks alongside the
+  roster; scrypt's work factor keeps a full sweep at decades of CPU time even
+  with the key in hand. `maxmem` is passed explicitly because `n=2**14, r=8`
+  sits close enough to OpenSSL's 32MB default ceiling to raise instead of
+  hashing. Cost is ~100-200ms per tap on the Pi, paid on the CAC reader
+  thread — never a Flask request thread — inside the 1-3s the PKCS#11 read
+  already takes. Don't move hashing into a request path or a poll handler.
+  - `config/roster.key` is the salt, generated on first use with mode 0600
+    and gitignored. It is unrecoverable: hashes made with one key mean
+    nothing to another, so losing it means re-adding every member. Because
+    a *generated* key is normal on a first run and a catastrophe on an
+    existing one, `_warn_if_roster_key_lost()` logs an ERROR when it sees a
+    fresh key alongside already-hashed rows — the failure is otherwise
+    silent, every card simply stopping working at once.
 - **`database.py`** — all SQLite access goes through `get_conn()`, which
   keeps one connection per thread (`threading.local`) since sqlite3
   connections aren't safe to share across threads; this matters because the
   CAC reader thread and Flask request threads both hit the DB. Schema is two
   tables: `members` (synced from `config/members.json` on every startup via
-  `sync_members_from_config()` — upserts by `edipi`, and sets `active = 0`
+  `sync_members_from_config()` — upserts by `edipi_hash`, and sets `active = 0`
   for anyone no longer listed, which is what takes them off the kiosk and
   dashboard. It never DELETEs: `events.member_id` is a foreign key into
   this table, so dropping the row would either fail or orphan the attendance
-  history the table exists to keep. Re-adding an `edipi` flips `active` back
+  history the table exists to keep. Re-adding an `edipi_hash` flips `active` back
   to 1 on the same row rather than creating a second one, so the person's
   history reconnects. A config that parses but lists no members is treated
   as a bad edit and deactivates nobody — otherwise one stray comma blanks
@@ -346,8 +365,12 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `CREATE TABLE IF NOT EXISTS` is a no-op on existing installs, so adding
     a column means a `_migrate_*` helper that checks
     `PRAGMA table_info` and `ALTER TABLE`s if missing — see
-    `_migrate_add_note_column()` for the pattern. It must be idempotent;
-    it runs on every startup.
+    `_migrate_add_note_column()` for the pattern, and
+    `_migrate_hash_edipi_column()` for one that rewrites data as well as
+    shape (it renames `edipi` → `edipi_hash` and rehashes in place — in
+    place specifically so `members.id`, and therefore every `events` row
+    hanging off it, survives). It must be idempotent; it runs on every
+    startup.
 - **Kiosk timestamps** — `fmtTime()` in `main.js` prints just the time for
   something that happened today, and prepends the date when it didn't, so
   yesterday's 5:00 PM checkout can't be misread as this evening's by someone
@@ -389,9 +412,13 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   `action = 'out'`, so a stale/late request can't graft a note onto an
   unrelated check-in. `get_roster_status()` surfaces `note` only while the
   member is currently out — it's tied to that checkout, not a profile field.
-- **`config/members.json`** — EDIPI → display name roster. Edited by the lab
-  admin directly; re-synced into the DB on every app startup (restart
-  required to pick up changes).
+- **`config/members.json`** — hashed EDIPI → display name roster. Written by
+  `scripts/add-member.py` (prompts for the EDIPI with `getpass`, so it stays
+  out of the file, the terminal and shell history); removing someone is still
+  a hand-edit. Re-synced into the DB on every app startup (restart required to
+  pick up changes). An entry carrying a plaintext `edipi` instead is still
+  accepted and hashed on the fly, with a WARNING naming the person — a
+  half-finished hand-edit shouldn't silently drop somebody off the board.
 - **`config/objectives.json`** — kiosk screensaver text. Each objective
   becomes one full-panel slide in the media rotation (see below). Re-read by
   the frontend every 60s with no restart needed (`/api/objectives`); a change
@@ -439,3 +466,12 @@ PIN — sufficient to identify who tapped (EDIPI is embedded in the cert) but
 not a cryptographic proof of physical key possession the way a PIN-backed
 challenge would be. This is an accepted tradeoff for a small lab attendance
 log, not an oversight — don't "fix" it by adding PIN prompts unless asked.
+
+The roster stores hashed EDIPIs (see `identity.py` above), so the ID numbers
+exist only on the cards themselves — not in the config file, the database, or
+the journal (`_handle_tap()` logs an 8-character hash prefix for an unknown
+card, enough to correlate repeat taps, and never the number). Display names
+are not protected and are still plainly in the repo. This repo is public, and
+the plaintext EDIPIs it used to carry were purged from history with
+`git filter-repo`; don't reintroduce a real one, in a config file, a test, or
+a comment example — `cac_reader.py`'s UPN samples are deliberately fake.

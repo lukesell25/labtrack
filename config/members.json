@@ -1,10 +1,25 @@
 {
-  "_comment": "Fill in each lab member's EDIPI (the 10-digit DoD ID number printed on the front of the CAC, also embedded in the PIV certificate). display_name is what shows on the kiosk and dashboard.",
+  "_comment": "display_name is what shows on the kiosk and dashboard. edipi_hash is a one-way hash of the member's 10-digit DoD ID, salted with config/roster.key - the number itself is never stored here. Add people with scripts/add-member.py \"Their Name\"; remove someone by deleting their entry. Restart the app to apply either.",
   "members": [
-    { "edipi": "0000000000", "display_name": "Luke Sellmayer" },
-    { "edipi": "0000000001", "display_name": "Drew Gibson" },
-    { "edipi": "1000000003", "display_name": "Member Three" },
-    { "edipi": "1000000004", "display_name": "Member Four" },
-    { "edipi": "1000000005", "display_name": "Member Five" }
+    {
+      "edipi_hash": "8e438879897f0e081615291196607ef9",
+      "display_name": "Luke Sellmayer"
+    },
+    {
+      "edipi_hash": "59c6e9d11421a7d524649b139861d5b8",
+      "display_name": "Drew Gibson"
+    },
+    {
+      "edipi_hash": "e86805bc1ed2c83f45e12ae80088dba0",
+      "display_name": "Member Three"
+    },
+    {
+      "edipi_hash": "1c99d9152b144eba2b2817cd25f534d8",
+      "display_name": "Member Four"
+    },
+    {
+      "edipi_hash": "12002ccd7a246528b2b960ee1ef430b8",
+      "display_name": "Member Five"
+    }
   ]
 }

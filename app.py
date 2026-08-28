@@ -9,6 +9,7 @@ from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 import database as db
+import identity
 from cac_reader import get_reader_presence, start_cac_monitor, start_reader_watch
 from health import start_health_monitor, sample as health_sample
 
@@ -84,9 +85,14 @@ def _handle_unrecognized(reason: str):
 
 def _handle_tap(edipi: str):
     """Called from the CAC monitor thread whenever a card is identified."""
-    member = db.get_member_by_edipi(edipi)
+    # The EDIPI itself is never stored or logged - only its hash, which is
+    # what the roster is keyed on. The prefix is enough to tell repeat taps of
+    # the same unknown card apart in the journal, which is persistent for a
+    # month (see scripts/setup.sh), without putting a DoD ID in it.
+    edipi_hash = identity.hash_edipi(edipi)
+    member = db.get_member_by_hash(edipi_hash)
     if member is None:
-        log.warning("Unrecognized card tapped (EDIPI not in roster): %s", edipi)
+        log.warning("Unrecognized card tapped (hash %s not in roster)", edipi_hash[:8])
         _set_reading(False)
         _push_event(None, "error", "Card not recognized")
         return

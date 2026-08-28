@@ -52,7 +52,8 @@ labtrack/
   app.py                  Flask app + routes
   database.py              SQLite schema + queries
   cac_reader.py             Background thread that watches the card reader
-  config/members.json       EDIPI -> name roster (edit this!)
+  config/members.json       Hashed EDIPI -> name roster (scripts/add-member.py)
+  config/roster.key         Secret salt for those hashes - back this up, never commit it
   config/objectives.json    Screensaver text content (edit any time)
   templates/                Kiosk + dashboard HTML
   static/                   CSS, JS, and a media/ folder for slide pictures
@@ -60,7 +61,9 @@ labtrack/
   health.py                 Once-a-minute health heartbeat for long runs
   systemd/labtrack.service   Runs the app on boot
   autostart/*.desktop       Launches Chromium kiosk mode on desktop login
+  identity.py               One-way hashing of EDIPIs for the roster
   scripts/setup.sh          Installs everything below in one go
+  scripts/add-member.py     Adds a member without their EDIPI hitting disk
   scripts/soak-report.sh    Summarises a long unattended run
 ```
 
@@ -93,26 +96,66 @@ You'll be prompted for your sudo password partway through.
 
 ### 3. Fill in your roster
 
-Edit `config/members.json` and replace the placeholder EDIPIs with your 5 lab
-members' real 10-digit EDIPIs (printed on the front of each CAC). The app
-picks this up automatically the next time it starts (`systemctl restart labtrack`
-if you edit it after setup).
+Add each lab member with their name and the 10-digit EDIPI printed on the
+front of their CAC:
+
+```bash
+python3 scripts/add-member.py "Ada Vance"
+```
+
+It asks for the EDIPI twice, without echoing it, and writes only a hash of it
+to `config/members.json` — the number itself is never stored, not in the file,
+not in the database, not in the journal. Because it asks rather than taking an
+argument, the EDIPI also stays out of your shell history. Restart to pick it
+up:
+
+```bash
+sudo systemctl restart labtrack
+```
+
+Since the hash is one-way there is no way to check a typo afterwards — a wrong
+digit just means the card is never recognised — which is why it prompts twice.
+If that happens, delete the entry and add the person again.
+
+**The hashing key.** The hashes are salted with `config/roster.key`, generated
+automatically the first time the app or `add-member.py` runs and readable only
+by its owner. **Back it up somewhere off the Pi.** Hashes are meaningless
+without the key that made them: lose it and every card stops matching and the
+whole roster has to be re-added. The app says so on startup rather than
+quietly failing:
+
+```
+ERROR labtrack.db: 5 member(s) were hashed with a different roster key than the one at ...
+```
+
+The key never leaves the machine it was made on, so a dev box generates its
+own and gets its own throwaway roster — don't expect hashes to be portable
+between the two, and don't copy the Pi's key onto a laptop to make them.
 
 **Adding and removing people.** The file is the source of truth: anyone added
 appears on the board after a restart, and anyone removed disappears from the
 status board and from "Hours this week". Their past check-ins stay in the
 database and keep showing in "Recent activity" — removing someone retires
 them, it doesn't erase the attendance log, and their card stops being
-recognised. Put the same EDIPI back and they return with their history
+recognised. Add the same EDIPI back and they return with their history
 intact. The restart logs what changed:
 
 ```
 INFO labtrack.db: Roster sync deactivated 1 member(s): Ada Vance
 ```
 
-Note the roster is keyed on **EDIPI**, not on name or position in the file —
-so reordering the list or fixing a spelling is safe, but changing someone's
-EDIPI reads as "one person left, a different one joined".
+Note the roster is keyed on the **hashed EDIPI**, not on name or position in
+the file — so reordering the list or fixing a spelling is safe, but re-adding
+someone with a different EDIPI reads as "one person left, a different one
+joined".
+
+A hand-edited entry with a plaintext `"edipi": "1234567890"` still works, so a
+half-finished edit can't silently drop somebody off the board, but it defeats
+the point and every startup will say so until it's converted:
+
+```
+WARNING labtrack.db: config/members.json lists a plaintext EDIPI for Ada Vance ...
+```
 
 ### 4. Plug in the smart card reader and test it
 
@@ -559,6 +602,15 @@ like) and `video-too-short` (a replacement clip shorter than `LOOP_TAIL_S`).
   `sqlite3 labtrack.db` to poke at it directly if needed).
 
 ## A note on the CAC integration
+
+The roster stores `scrypt(EDIPI, salt=config/roster.key)` rather than the
+EDIPI, so a tap is identified by hashing the card's EDIPI and matching. Ten
+digits is a small enough keyspace that a plain SHA-256 would be brute-forced
+in minutes, and an HMAC would be too as soon as the key file leaked next to
+the roster it protects; scrypt's work factor puts a full sweep at decades of
+CPU time even for someone holding the key. It costs ~100-200ms per tap, on the
+reader thread, inside the 1-3s the certificate read already takes. Note this
+protects the ID numbers, not the names, which are still in the file.
 
 Reading is limited to what's available *without* PIN entry — the PIV
 Authentication certificate, which is a public object and readable by design.

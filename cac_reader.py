@@ -63,7 +63,7 @@ DEBOUNCE_SECONDS = 3
 
 # Microsoft UPN otherName OID. On DoD CACs this is commonly populated with a
 # value that starts with the 10-digit EDIPI (sometimes followed by extra
-# digits), e.g. "0000000000157005@mil".
+# digits), e.g. "1234567890123456@mil".
 UPN_OTHERNAME_OID = "1.3.6.1.4.1.311.20.2.3"
 
 
@@ -88,7 +88,7 @@ def _extract_edipi_from_cert(cert: x509.Certificate) -> str | None:
         pass
 
     # Fallback: SAN otherName carrying a UPN. DoD certs format this as the
-    # 10-digit EDIPI followed by additional digits, e.g. "0000000000157005@mil".
+    # 10-digit EDIPI followed by additional digits, e.g. "1234567890123456@mil".
     try:
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
         for other_name in san.get_values_for_type(x509.OtherName):

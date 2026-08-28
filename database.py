@@ -8,15 +8,21 @@ heavier than the standard library sqlite3 module.
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import identity
+
 log = logging.getLogger("labtrack.db")
 
 DB_PATH = Path(__file__).parent / "labtrack.db"
 MEMBERS_CONFIG = Path(__file__).parent / "config" / "members.json"
+
+# What a pre-hashing members.edipi value looks like, for the migration below.
+_PLAINTEXT_EDIPI = re.compile(r"^\d{10}$")
 
 # sqlite3 connections aren't thread-safe to share across threads by default;
 # each thread (Flask request thread, CAC reader thread) gets its own.
@@ -37,7 +43,7 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            edipi TEXT UNIQUE NOT NULL,
+            edipi_hash TEXT UNIQUE NOT NULL,
             display_name TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
         );
@@ -56,6 +62,8 @@ def init_db():
     )
     conn.commit()
     _migrate_add_note_column()
+    _migrate_hash_edipi_column()
+    _warn_if_roster_key_lost()
     sync_members_from_config()
 
 
@@ -70,6 +78,92 @@ def _migrate_add_note_column():
     if "note" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN note TEXT")
         conn.commit()
+
+
+def _migrate_hash_edipi_column():
+    """
+    Installs predating the hashed roster stored the raw 10-digit EDIPI in
+    members.edipi. Rename the column and replace each value with its hash,
+    in place.
+
+    In place rather than rebuilding the table, because that keeps members.id
+    stable - events.member_id is a foreign key into it, so reinserting would
+    either fail or detach the attendance history the table exists to keep.
+    It also takes the plaintext out of the live database, which is half the
+    point of hashing it in the first place. Idempotent (after one pass
+    nothing matches _PLAINTEXT_EDIPI), so it is safe on every startup.
+    """
+    conn = get_conn()
+    cols = [row["name"] for row in conn.execute("PRAGMA table_info(members)").fetchall()]
+    if "edipi" in cols and "edipi_hash" not in cols:
+        conn.execute("ALTER TABLE members RENAME COLUMN edipi TO edipi_hash")
+        conn.commit()
+
+    stale = [
+        r for r in conn.execute("SELECT id, edipi_hash FROM members")
+        if _PLAINTEXT_EDIPI.match(r["edipi_hash"])
+    ]
+    if not stale:
+        return
+    for r in stale:
+        conn.execute(
+            "UPDATE members SET edipi_hash = ? WHERE id = ?",
+            (identity.hash_edipi(r["edipi_hash"]), r["id"]),
+        )
+    conn.commit()
+    # An UPDATE leaves the old page content in the freelist, so the plaintext
+    # can outlive the rows that held it; VACUUM rewrites the file without it.
+    # One-time - this whole branch is skipped once nothing is stale.
+    conn.execute("VACUUM")
+    log.info("Hashed %d plaintext EDIPI(s) in the members table", len(stale))
+
+
+def _warn_if_roster_key_lost():
+    """
+    Having had to *generate* the roster key is unremarkable on a first run and
+    a disaster on an existing one: hashes written with the old key can never
+    match a tap hashed with the new one, so every member quietly stops being
+    recognised while the board still looks fine. Nothing can recover that
+    automatically - the point is only that it says so rather than presenting
+    as an empty lab. Rows still holding plaintext don't count: those are a
+    pre-hashing install being upgraded, which is the normal path.
+    """
+    identity.load_key()
+    if not identity.key_was_generated:
+        return
+    conn = get_conn()
+    hashed = [
+        r for r in conn.execute("SELECT edipi_hash FROM members")
+        if not _PLAINTEXT_EDIPI.match(r["edipi_hash"])
+    ]
+    if hashed:
+        log.error(
+            "%d member(s) were hashed with a different roster key than the one "
+            "at %s, which was just generated fresh - no card will be recognised. "
+            "Restore the old key file from backup, or re-add everyone with "
+            "scripts/add-member.py.",
+            len(hashed),
+            identity.KEY_PATH,
+        )
+
+
+def _entry_hash(entry: dict, name: str) -> str:
+    """
+    A roster entry identifies someone by edipi_hash. A plaintext `edipi` is
+    still accepted and hashed on the fly - a hand-edit shouldn't silently drop
+    someone off the board - but it means the number is sitting in the config
+    file, so say so on every startup until it gets converted.
+    """
+    if entry.get("edipi_hash"):
+        return str(entry["edipi_hash"]).strip()
+    log.warning(
+        "%s lists a plaintext EDIPI for %s. It works, but the number is stored "
+        "in the clear - run scripts/add-member.py to replace that entry with an "
+        "edipi_hash.",
+        MEMBERS_CONFIG,
+        name,
+    )
+    return identity.hash_edipi(entry["edipi"])
 
 
 def sync_members_from_config():
@@ -91,35 +185,38 @@ def sync_members_from_config():
     entries = data.get("members", [])
     conn = get_conn()
 
-    before = {r["edipi"]: r for r in conn.execute("SELECT edipi, display_name, active FROM members")}
+    before = {
+        r["edipi_hash"]: r
+        for r in conn.execute("SELECT edipi_hash, display_name, active FROM members")
+    }
 
-    config_edipis = set()
+    config_hashes = set()
     added, reactivated = [], []
     for m in entries:
-        edipi = str(m["edipi"]).strip()
         name = m["display_name"].strip()
-        config_edipis.add(edipi)
-        previous = before.get(edipi)
+        edipi_hash = _entry_hash(m, name)
+        config_hashes.add(edipi_hash)
+        previous = before.get(edipi_hash)
         if previous is None:
             added.append(name)
         elif not previous["active"]:
             reactivated.append(name)
         conn.execute(
             """
-            INSERT INTO members (edipi, display_name, active)
+            INSERT INTO members (edipi_hash, display_name, active)
             VALUES (?, ?, 1)
-            ON CONFLICT(edipi) DO UPDATE SET
+            ON CONFLICT(edipi_hash) DO UPDATE SET
                 display_name = excluded.display_name,
                 active = 1
             """,
-            (edipi, name),
+            (edipi_hash, name),
         )
 
     # A roster that reads as empty is far more likely to be a broken edit -
     # a stray comma, a half-saved file, the wrong key name - than a lab with
     # nobody in it. Deactivating everyone on that basis would blank the board
     # and take a restart to undo, so treat it as bad input and change nothing.
-    if not config_edipis:
+    if not config_hashes:
         log.warning(
             "%s lists no members, so no one was deactivated - check the file "
             "if this wasn't deliberate. The existing roster is unchanged.",
@@ -128,19 +225,19 @@ def sync_members_from_config():
         conn.commit()
         return
 
-    placeholders = ",".join("?" * len(config_edipis))
-    params = tuple(config_edipis)
+    placeholders = ",".join("?" * len(config_hashes))
+    params = tuple(config_hashes)
     removed = [
         r["display_name"]
         for r in conn.execute(
             f"SELECT display_name FROM members "
-            f"WHERE active = 1 AND edipi NOT IN ({placeholders})",
+            f"WHERE active = 1 AND edipi_hash NOT IN ({placeholders})",
             params,
         )
     ]
     if removed:
         conn.execute(
-            f"UPDATE members SET active = 0 WHERE edipi NOT IN ({placeholders})", params
+            f"UPDATE members SET active = 0 WHERE edipi_hash NOT IN ({placeholders})", params
         )
     conn.commit()
 
@@ -149,10 +246,11 @@ def sync_members_from_config():
             log.info("Roster sync %s %d member(s): %s", label, len(names), ", ".join(names))
 
 
-def get_member_by_edipi(edipi: str):
+def get_member_by_hash(edipi_hash: str):
+    """Look a member up by identity.hash_edipi(edipi) - see app._handle_tap()."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT * FROM members WHERE edipi = ? AND active = 1", (edipi,)
+        "SELECT * FROM members WHERE edipi_hash = ? AND active = 1", (edipi_hash,)
     ).fetchone()
     return dict(row) if row else None
 
