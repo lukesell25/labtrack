@@ -1,0 +1,18 @@
+[Unit]
+Description=Nightly reboot of the LabTrack kiosk Pi at 00:00
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+# Persistent=false (the default, stated outright) is load-bearing: with it on,
+# systemd treats a window it slept through as a missed run and fires as soon
+# as it can. A Pi that was powered off overnight would then reboot itself
+# moments after being switched on. This timer is for a machine that runs
+# continuously; a skipped night should simply be skipped.
+Persistent=false
+# The default one-minute accuracy window is fine and is what keeps every timer
+# on the system from firing at exactly the same instant. Nothing here needs
+# the second.
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

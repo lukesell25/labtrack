@@ -1,0 +1,14 @@
+[Unit]
+Description=Reboot the LabTrack kiosk Pi
+# Deliberately not tied to labtrack.service. The nightly reboot exists for the
+# failure modes that leave the app looking fine - Chromium creeping toward the
+# OOM killer, the Pi's video decoder wedged on a dead frame - so it should
+# happen whether or not the app is healthy, not because of it.
+
+[Service]
+Type=oneshot
+# --no-block is load-bearing: a plain `systemctl reboot` waits for the reboot
+# job to finish, but that job has to stop this very unit first, so the two
+# wait on each other. Absolute path for the same reason health.py resolves
+# vcgencmd absolutely - a service gets a minimal PATH.
+ExecStart=/usr/bin/systemctl --no-block reboot

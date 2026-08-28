@@ -56,6 +56,15 @@ sudo cp systemd/labtrack.service /etc/systemd/system/labtrack.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now labtrack
 
+echo "==> Installing the nightly reboot timer (00:00 daily)"
+# The kiosk runs unattended for weeks; a scheduled reboot is what clears the
+# slow failures nothing else recovers from (Chromium's memory creep, a wedged
+# video decoder). Enabling the timer does not reboot now - it only schedules.
+sudo cp systemd/labtrack-reboot.service /etc/systemd/system/labtrack-reboot.service
+sudo cp systemd/labtrack-reboot.timer /etc/systemd/system/labtrack-reboot.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now labtrack-reboot.timer
+
 echo "==> Installing kiosk autostart (labwc - the default Wayland desktop on current Raspberry Pi OS)"
 mkdir -p ~/.config/labwc
 cp autostart/labwc-autostart ~/.config/labwc/autostart

@@ -60,6 +60,7 @@ labtrack/
                             and the background video
   health.py                 Once-a-minute health heartbeat for long runs
   systemd/labtrack.service   Runs the app on boot
+  systemd/labtrack-reboot.*  Timer + unit for the nightly 00:00 reboot
   autostart/*.desktop       Launches Chromium kiosk mode on desktop login
   identity.py               One-way hashing of EDIPIs for the roster
   scripts/setup.sh          Installs everything below in one go
@@ -596,9 +597,49 @@ Two related reports come from the same watchdog: `video-never-started` (no
 first frame within 30s — what the non-faststart range-request stall looks
 like) and `video-too-short` (a replacement clip shorter than `LOOP_TAIL_S`).
 
+## Nightly reboot
+
+`scripts/setup.sh` installs a systemd timer that reboots the Pi every night at
+**00:00**. The board is back up within a minute or so — the app starts on boot
+and labwc relaunches Chromium in kiosk mode.
+
+This is maintenance, not a fix for anything specific. The failure modes that
+matter on a machine left running for weeks are the ones that leave everything
+*looking* fine: Chromium's memory creeping up until the OOM killer picks
+something, or the Pi's video decoder wedging on a dead frame. A daily reboot
+clears both before they get far enough to notice.
+
+Check the schedule:
+
+```bash
+systemctl list-timers labtrack-reboot.timer
+```
+
+```
+NEXT                        LEFT     LAST  PASSED  UNIT                   ACTIVATES
+Sat 2026-08-29 00:00:00 MDT 8h left  -     -       labtrack-reboot.timer  labtrack-reboot.service
+```
+
+Change the time by editing `OnCalendar` in
+`/etc/systemd/system/labtrack-reboot.timer` (`systemd-analyze calendar "*-*-* 03:00:00"`
+checks an expression before you commit to it), then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart labtrack-reboot.timer
+```
+
+Turn it off with `sudo systemctl disable --now labtrack-reboot.timer`.
+
+A reboot doesn't check anybody out — `events` is append-only, so whoever was
+checked in at midnight is still checked in afterwards and their hours keep
+accruing. That's unchanged by this timer; it's the same as any other restart.
+
 ## Day-to-day maintenance
 
 - **Restart the app:** `sudo systemctl restart labtrack`
+- **Reboot the Pi now:** `sudo systemctl reboot` (it also does this nightly on
+  its own — see "Nightly reboot" above)
 - **View logs:** `sudo journalctl -u labtrack -f`
 - **Check on a long run:** `scripts/soak-report.sh` (see "Watching a long
   run" above), or `curl -s http://localhost:5000/api/health` for one sample

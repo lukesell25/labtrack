@@ -457,8 +457,12 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     human in front of it who can open devtools.
 - **Pi deployment** (`scripts/setup.sh`, `systemd/`, `autostart/`) — installs
   system packages, a systemd service (gunicorn, assumes path
-  `/home/admin/labtrack`), a labwc (Wayland) autostart entry for kiosk-mode
-  Chromium, a polkit rule so `pcscd` authorizes the service user (no
+  `/home/admin/labtrack`), a timer that reboots the Pi nightly at 00:00
+  (`labtrack-reboot.timer`; `Persistent=false` so a Pi that was off overnight
+  doesn't reboot itself on the next power-up, and the service calls
+  `systemctl --no-block reboot` because a blocking call would wait on a job
+  that has to stop the caller first), a labwc (Wayland) autostart entry for
+  kiosk-mode Chromium, a polkit rule so `pcscd` authorizes the service user (no
   interactive login session), and a Chromium flag drop-in to skip the
   login-keyring prompt. See README.md for the full hardware bring-up
   walkthrough and troubleshooting (polkit denial, labwc autostart quirks,
