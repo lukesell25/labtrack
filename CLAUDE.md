@@ -314,7 +314,15 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   connections aren't safe to share across threads; this matters because the
   CAC reader thread and Flask request threads both hit the DB. Schema is two
   tables: `members` (synced from `config/members.json` on every startup via
-  `sync_members_from_config()` — upserts by `edipi`, never deletes) and
+  `sync_members_from_config()` — upserts by `edipi`, and sets `active = 0`
+  for anyone no longer listed, which is what takes them off the kiosk and
+  dashboard. It never DELETEs: `events.member_id` is a foreign key into
+  this table, so dropping the row would either fail or orphan the attendance
+  history the table exists to keep. Re-adding an `edipi` flips `active` back
+  to 1 on the same row rather than creating a second one, so the person's
+  history reconnects. A config that parses but lists no members is treated
+  as a bad edit and deactivates nobody — otherwise one stray comma blanks
+  the whole board until someone notices and restarts) and
   `events` (append-only check-in/out log; `action` is `'in'`/`'out'`,
   current status for a member = the most recent event, `note` is the
   optional checkout comment). `get_weekly_hours()` computes hours by pairing

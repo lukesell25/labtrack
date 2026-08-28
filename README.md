@@ -98,6 +98,22 @@ members' real 10-digit EDIPIs (printed on the front of each CAC). The app
 picks this up automatically the next time it starts (`systemctl restart labtrack`
 if you edit it after setup).
 
+**Adding and removing people.** The file is the source of truth: anyone added
+appears on the board after a restart, and anyone removed disappears from the
+status board and from "Hours this week". Their past check-ins stay in the
+database and keep showing in "Recent activity" — removing someone retires
+them, it doesn't erase the attendance log, and their card stops being
+recognised. Put the same EDIPI back and they return with their history
+intact. The restart logs what changed:
+
+```
+INFO labtrack.db: Roster sync deactivated 1 member(s): Ada Vance
+```
+
+Note the roster is keyed on **EDIPI**, not on name or position in the file —
+so reordering the list or fixing a spelling is safe, but changing someone's
+EDIPI reads as "one person left, a different one joined".
+
 ### 4. Plug in the smart card reader and test it
 
 ```bash

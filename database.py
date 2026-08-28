@@ -7,10 +7,13 @@ heavier than the standard library sqlite3 module.
 """
 
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+
+log = logging.getLogger("labtrack.db")
 
 DB_PATH = Path(__file__).parent / "labtrack.db"
 MEMBERS_CONFIG = Path(__file__).parent / "config" / "members.json"
@@ -70,23 +73,80 @@ def _migrate_add_note_column():
 
 
 def sync_members_from_config():
-    """Insert/update members from config/members.json. Safe to call repeatedly."""
+    """
+    Reconcile the members table with config/members.json: add new people,
+    update renamed ones, and deactivate anyone no longer listed. Safe to
+    call repeatedly - it runs on every startup.
+
+    Members are deactivated, never deleted. Their events reference members.id
+    with a foreign key, so deleting the row would either fail or orphan the
+    attendance history it exists to preserve; `active = 0` takes them off the
+    board while leaving the log intact. get_roster_status() and
+    get_weekly_hours() both filter on active, so this is all it takes for
+    someone to disappear from the kiosk and the dashboard.
+    """
     if not MEMBERS_CONFIG.exists():
         return
     data = json.loads(MEMBERS_CONFIG.read_text())
+    entries = data.get("members", [])
     conn = get_conn()
-    for m in data.get("members", []):
+
+    before = {r["edipi"]: r for r in conn.execute("SELECT edipi, display_name, active FROM members")}
+
+    config_edipis = set()
+    added, reactivated = [], []
+    for m in entries:
         edipi = str(m["edipi"]).strip()
         name = m["display_name"].strip()
+        config_edipis.add(edipi)
+        previous = before.get(edipi)
+        if previous is None:
+            added.append(name)
+        elif not previous["active"]:
+            reactivated.append(name)
         conn.execute(
             """
             INSERT INTO members (edipi, display_name, active)
             VALUES (?, ?, 1)
-            ON CONFLICT(edipi) DO UPDATE SET display_name = excluded.display_name
+            ON CONFLICT(edipi) DO UPDATE SET
+                display_name = excluded.display_name,
+                active = 1
             """,
             (edipi, name),
         )
+
+    # A roster that reads as empty is far more likely to be a broken edit -
+    # a stray comma, a half-saved file, the wrong key name - than a lab with
+    # nobody in it. Deactivating everyone on that basis would blank the board
+    # and take a restart to undo, so treat it as bad input and change nothing.
+    if not config_edipis:
+        log.warning(
+            "%s lists no members, so no one was deactivated - check the file "
+            "if this wasn't deliberate. The existing roster is unchanged.",
+            MEMBERS_CONFIG,
+        )
+        conn.commit()
+        return
+
+    placeholders = ",".join("?" * len(config_edipis))
+    params = tuple(config_edipis)
+    removed = [
+        r["display_name"]
+        for r in conn.execute(
+            f"SELECT display_name FROM members "
+            f"WHERE active = 1 AND edipi NOT IN ({placeholders})",
+            params,
+        )
+    ]
+    if removed:
+        conn.execute(
+            f"UPDATE members SET active = 0 WHERE edipi NOT IN ({placeholders})", params
+        )
     conn.commit()
+
+    for label, names in (("added", added), ("reactivated", reactivated), ("deactivated", removed)):
+        if names:
+            log.info("Roster sync %s %d member(s): %s", label, len(names), ", ".join(names))
 
 
 def get_member_by_edipi(edipi: str):
