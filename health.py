@@ -16,6 +16,7 @@ dies silently partway through a soak test is worse than no monitor at all.
 
 import logging
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -125,20 +126,74 @@ def _chromium_mem_mb():
     return (total if count else None), count
 
 
+# vcgencmd has to be found by absolute path, not by name. The systemd unit
+# sets PATH to just the venv's bin directory - that is enough for gunicorn,
+# which is launched by absolute path, but it means a bare "vcgencmd" is
+# unfindable from the service even though it runs fine in an interactive
+# shell. Rather than depend on the unit's PATH staying right, look in the
+# usual places ourselves. (/opt/vc/bin is where it lived pre-Bullseye.)
+_VCGENCMD_FALLBACKS = ("/usr/bin/vcgencmd", "/opt/vc/bin/vcgencmd", "/usr/local/bin/vcgencmd")
+
+# Resolved on first use and cached; _warned makes the "why is this ?" 
+# explanation appear exactly once per boot instead of every minute forever.
+_vcgencmd = {"path": None, "resolved": False, "warned": False}
+
+
+def _vcgencmd_path():
+    if not _vcgencmd["resolved"]:
+        found = shutil.which("vcgencmd")
+        if not found:
+            found = next((p for p in _VCGENCMD_FALLBACKS if os.access(p, os.X_OK)), None)
+        _vcgencmd.update(path=found, resolved=True)
+    return _vcgencmd["path"]
+
+
+def _warn_once_about_vcgencmd(message):
+    """
+    A silent "?" in the heartbeat is worse than useless during a soak test -
+    it looks like a reading rather than a missing probe. Say why, once.
+    """
+    if not _vcgencmd["warned"]:
+        _vcgencmd["warned"] = True
+        log.warning("throttled=? in the health line: %s", message)
+
+
 def _throttled():
     """(raw hex string, list of human-readable flags) from vcgencmd."""
+    path = _vcgencmd_path()
+    if path is None:
+        _warn_once_about_vcgencmd(
+            "vcgencmd not found on PATH or in " + ", ".join(_VCGENCMD_FALLBACKS)
+            + " - undervoltage and thermal throttling cannot be detected. "
+            "This is expected off the Pi."
+        )
+        return None, []
     try:
-        out = subprocess.run(
-            ["vcgencmd", "get_throttled"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        return None, []       # not a Pi, or vcgencmd not installed
-    _, _, value = out.partition("=")
+        proc = subprocess.run(
+            [path, "get_throttled"], capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        _warn_once_about_vcgencmd(f"{path} could not be run: {e}")
+        return None, []
+
+    _, _, value = proc.stdout.strip().partition("=")
     try:
         bits = int(value, 16)
     except ValueError:
+        # Almost always a permissions problem: vcgencmd needs /dev/vcio,
+        # which is group `video`. It writes the complaint to stderr and
+        # leaves stdout empty, so include stderr in the explanation.
+        detail = (proc.stderr or "").strip() or f"unparseable output {proc.stdout.strip()!r}"
+        _warn_once_about_vcgencmd(
+            f"{path} exited {proc.returncode}: {detail}"
+            " - if this mentions VCHI or permissions, add the service user to the"
+            " `video` group (sudo usermod -aG video admin) and reboot"
+        )
         return None, []
+
+    # A successful read after an earlier failure should be able to complain
+    # again if it later breaks for a different reason.
+    _vcgencmd["warned"] = False
     return value, [text for bit, text in _THROTTLE_BITS.items() if bits & (1 << bit)]
 
 

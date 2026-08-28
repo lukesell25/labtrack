@@ -296,7 +296,13 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   post-mortems on multi-week runs: the failure modes that matter there
   (Chromium leaking until the OOM killer fires, a marginal PSU browning the
   Pi out) leave nothing in the app's own logs, so the trend line *is* the
-  evidence. Every probe is individually guarded and yields `?` on failure,
+  evidence. `vcgencmd` is located by absolute path rather than by name: the
+  unit file sets `PATH`, and a venv-only `PATH` leaves a bare `vcgencmd`
+  unfindable from the service while still working in an interactive shell —
+  which is exactly how `throttled=?` happened once. Every probe is
+  individually guarded and yields `?` on failure, with a one-per-boot
+  WARNING naming which probe failed and why (a silent `?` reads like a
+  reading rather than a missing measurement),
   and the whole loop body is wrapped — a monitor that dies quietly partway
   through a soak test is worse than no monitor at all. The line crosses to
   WARNING when memory, disk, temperature, `vcgencmd get_throttled` or kiosk

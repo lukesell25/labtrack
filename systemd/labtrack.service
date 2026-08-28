@@ -7,7 +7,12 @@ Wants=pcscd.service
 Type=simple
 User=admin
 WorkingDirectory=/home/admin/labtrack
-Environment=PATH=/home/admin/labtrack/venv/bin
+# The system directories are on here deliberately: a bare PATH of just the
+# venv would make gunicorn work (it is launched by absolute path) while
+# silently breaking any subprocess looked up by name - which is exactly how
+# health.py's `vcgencmd get_throttled` probe came to report "?" for
+# undervoltage. health.py now resolves it absolutely too, belt and braces.
+Environment=PATH=/home/admin/labtrack/venv/bin:/usr/local/bin:/usr/bin:/bin
 # Belt and braces so log lines reach journald promptly even if something
 # upstream leaves stderr block-buffered - during a multi-day soak test a
 # buffered final line is exactly the one you want after a crash.

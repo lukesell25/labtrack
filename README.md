@@ -466,6 +466,21 @@ Two fields are worth knowing about specifically:
 
 A one-off sample without an ssh session: `curl -s http://<pi>:5000/api/health`.
 
+**If a field reads `?`** it means that probe could not be taken, not that the
+value was zero — and the heartbeat says why once per boot, at WARNING:
+
+```bash
+journalctl -u labtrack -p warning | grep 'health line'
+```
+
+For `throttled=?` specifically there are two causes. The common one is PATH:
+the systemd unit sets `PATH` explicitly, and if it lists only the venv's `bin`
+directory then `vcgencmd` is unfindable from the service even though it works
+in your shell. `systemd/labtrack.service` now appends the system directories,
+and `health.py` resolves `vcgencmd` by absolute path anyway. The other is
+permissions — `vcgencmd` needs `/dev/vcio`, which is group `video`; if the
+warning mentions VCHI or vchiq, run `sudo usermod -aG video admin` and reboot.
+
 ### Reviewing the run
 
 ```bash
