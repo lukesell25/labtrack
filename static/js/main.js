@@ -64,6 +64,16 @@ window.addEventListener("unhandledrejection", (e) => {
   report("unhandled-rejection", String(e.reason));
 });
 
+// 24-hour time everywhere on this board. hourCycle "h23" states the
+// convention outright rather than leaning on hour12:false, whose mapping to
+// h23 vs h24 (00:00 vs 24:00 for midnight) has varied by locale and ICU
+// version; h23 is unambiguous on any of them. The locale stays [] - the
+// browser's own - so this pins the clock convention and nothing else.
+const TIME_OPTS = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+const CLOCK_TIME_OPTS = { ...TIME_OPTS, second: "2-digit" };
+const CLOCK_DATE_OPTS = { weekday: "short", month: "short", day: "numeric" };
+const STAMP_DATE_OPTS = { month: "short", day: "numeric" };
+
 // Local calendar day, as a comparable string. Built from the date parts
 // rather than an ISO slice because toISOString() is UTC - after 5pm Mountain
 // that reports tomorrow, which would put a date on every evening checkout.
@@ -79,11 +89,9 @@ function dayKey(d) {
 function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
-  // "5:00 PM", not "05:00 PM" - the padding zero buys nothing and the date
-  // form below is tight on width at a full roster (see .roster__status).
-  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const time = d.toLocaleTimeString([], TIME_OPTS);
   if (dayKey(d) === dayKey(new Date())) return time;
-  return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${time}`;
+  return `${d.toLocaleDateString([], STAMP_DATE_OPTS)}, ${time}`;
 }
 
 function escapeHtml(str) {
@@ -94,7 +102,13 @@ function escapeHtml(str) {
 
 let lastClockText = "";
 function renderClock() {
-  const text = new Date().toLocaleTimeString();
+  // Date alongside the live time. Same element and the same once-a-second
+  // compare as before, so the date costs nothing extra: the string only
+  // changes when the second does, and the DOM write is still skipped
+  // whenever it hasn't.
+  const now = new Date();
+  const text = `${now.toLocaleDateString([], CLOCK_DATE_OPTS)} · ` +
+               `${now.toLocaleTimeString([], CLOCK_TIME_OPTS)}`;
   if (text === lastClockText) return;
   lastClockText = text;
   document.getElementById("clock").textContent = text;

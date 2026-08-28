@@ -12,9 +12,13 @@ function skipIfUnchanged(key, data) {
   return false;
 }
 
+// 24-hour time, matching the kiosk. hourCycle "h23" states the convention
+// outright rather than leaning on hour12:false - see main.js.
+const TIME_OPTS = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+
 function fmtDateTime(iso) {
   const d = new Date(iso);
-  return d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleString([], { month: "short", day: "numeric", ...TIME_OPTS });
 }
 
 function escapeHtml(str) {
@@ -70,7 +74,8 @@ async function refresh() {
     renderRoster((await stateRes.json()).roster);
     renderHours(await hoursRes.json());
     renderEvents(await eventsRes.json());
-    document.getElementById("updated-at").textContent = new Date().toLocaleTimeString();
+    document.getElementById("updated-at").textContent =
+      new Date().toLocaleTimeString([], { ...TIME_OPTS, second: "2-digit" });
   } catch (e) {
     console.error("dashboard refresh failed", e);
   }

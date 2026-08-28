@@ -343,10 +343,20 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   checkout. And `renderRoster`'s change-detection key includes today's date,
   because the board can sit for days with no roster change and would
   otherwise carry yesterday's date-less rendering straight through midnight,
-  failing in exactly the case the date exists for. The status line is sized
-  at 1rem rather than 1.1rem to fit the longer date form on a six-card strip.
+  failing in exactly the case the date exists for. That dated form is also
+  what sizes `.roster__status` — it is the longest string the line ever
+  carries, and 1.1rem is the largest that fits it on a six-card strip.
   `dashboard.js`'s `fmtDateTime()` is separate and always shows the date:
   it's a log read from a foot away, not a glance from across the room.
+- **All times are 24-hour**, on both pages, via `hourCycle: "h23"` in the
+  shared `TIME_OPTS` at the top of each of `main.js` and `dashboard.js`. Use
+  those options for any new timestamp rather than a bare `toLocaleTimeString()`,
+  which reintroduces AM/PM. `h23` is stated outright rather than relying on
+  `hour12: false`, whose mapping to h23 vs h24 (00:00 vs 24:00 at midnight)
+  has varied by locale and ICU version. The locale itself stays the
+  browser's. The kiosk's top-right clock carries the weekday and date beside
+  the running time; it is still one string compared once a second, so the
+  date costs nothing on top of the clock that was already there.
 - **Checkout notes** — an optional "why are you out" comment, threaded
   through several layers: `toggle_checkin()` returns `checkin_event_id`
   (the new row's id) → `_push_event()` puts it on `_last_event` → the kiosk
