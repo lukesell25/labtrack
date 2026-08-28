@@ -9,7 +9,7 @@ from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 import database as db
-from cac_reader import start_cac_monitor
+from cac_reader import get_reader_presence, start_cac_monitor, start_reader_watch
 from health import start_health_monitor, sample as health_sample
 
 # Deliberately no timestamp in the format: in production every line goes to
@@ -129,6 +129,11 @@ def api_state():
             "roster": db.get_roster_status(),
             "last_event": last_event,
             "reading": reading,
+            # Sampled on a timer in cac_reader, not measured here - see
+            # get_reader_presence(). This endpoint is hit several times a
+            # second across the kiosk and every open dashboard, so it must
+            # not talk to pcscd itself.
+            "reader": get_reader_presence(),
         }
     )
 
@@ -277,6 +282,9 @@ def _init_cac_monitor():
 
 db.init_db()
 _init_cac_monitor()
+# Deliberately started even when _init_cac_monitor() failed: a Pi with no
+# working monitor is exactly when the board needs to say the reader is down.
+start_reader_watch()
 start_health_monitor(kiosk_idle_fn=_kiosk_idle_s)
 
 

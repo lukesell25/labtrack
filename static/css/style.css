@@ -115,6 +115,57 @@ body.kiosk.is-note-prompt {
   50% { opacity: 0.35; }
 }
 
+/* Right-hand end of the kiosk header: reader indicator, then the clock. */
+.board__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 1.75rem;
+}
+
+/* Card-reader presence. Flat colour only, and deliberately not animated:
+   this sits on screen permanently, and a blinking dot would cost the Pi a
+   repaint forever (see Performance in CLAUDE.md). The dot is a
+   pseudo-element rather than a child so the line's baseline stays the
+   label's, which is what keeps it level with the clock beside it. */
+.board__reader {
+  font-family: var(--mono);
+  font-size: 1rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-low);
+  --reader-dot: var(--text-low);
+}
+
+.board__reader::before {
+  content: "";
+  display: inline-block;
+  width: 0.62em;
+  height: 0.62em;
+  margin-right: 0.5em;
+  border-radius: 50%;
+  background: var(--reader-dot);
+}
+
+/* Working: quiet. The dot carries the state, the label stays dim so a
+   healthy board has nothing shouting at the top of it. */
+.board__reader.is-ok {
+  --reader-dot: var(--phosphor);
+}
+
+/* No reader, or PC/SC unreachable - nobody can check in, so this one is
+   meant to be readable from across the room. */
+.board__reader.is-down {
+  --reader-dot: var(--danger);
+  color: var(--danger);
+}
+
+/* Nothing is checking (no pyscard, or the checks went stale). Not known to
+   be broken, so amber rather than red - but not claimed to be working. */
+.board__reader.is-unknown {
+  --reader-dot: var(--amber);
+  color: var(--amber);
+}
+
 .board__clock {
   font-family: var(--mono);
   font-size: 1.4rem;

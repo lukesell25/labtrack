@@ -287,6 +287,20 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     the UPN SAN otherName. Deliberately does *not* use the DoD Person
     Identifier SAN OID (2.16.840.1.101.3.6.6) — that field holds a packed
     binary FASC-N, not text, on real-world CACs.
+  - `start_reader_watch()` is a second, independent thread that answers a
+    question the tap path never can: *is a reader even plugged in?* No taps
+    and an unplugged reader look identical from here, so it polls
+    `smartcard.System.readers()` every `READER_POLL_S` (10s) and caches
+    `{status, detail}` for `get_reader_presence()` — `ok`, `down` (no reader
+    *or* pcscd unreachable; both mean nobody can check in), or `unknown`.
+    Polling on a timer rather than per request is deliberate twice over:
+    `/api/state` is hit several times a second, and a wedged pcscd stalls
+    this thread instead of a Flask request thread. A sample older than
+    `READER_STALE_S` reports `unknown` rather than its last value, so a
+    checker that died can't leave a green dot up forever. Only *transitions*
+    are logged (INFO on connect, WARNING on loss) — a line per sample would
+    be ~9k a day. It's started even when `_init_cac_monitor()` failed, which
+    is exactly when the board needs to say so.
   - `_read_piv_auth_cert_der` retries for ~3s waiting for a PKCS#11 token:
     PC/SC reports a card present as soon as it's electrically detected,
     before OpenSC has finished exposing it as a token.
@@ -348,6 +362,14 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   carries, and 1.1rem is the largest that fits it on a six-card strip.
   `dashboard.js`'s `fmtDateTime()` is separate and always shows the date:
   it's a log read from a foot away, not a glance from across the room.
+- **Reader indicator** — the dot and label beside the kiosk clock
+  (`.board__reader`, `renderReader()` in `main.js`), fed by the `reader`
+  field on `/api/state`. Green/quiet when a reader is attached, red "Reader
+  offline" when not, amber "Reader unknown" when nothing is checking (no
+  pyscard, or stale samples — see `start_reader_watch()`). Deliberately
+  never animated: it is on screen permanently, so a blinking dot would cost
+  the Pi a repaint forever. The page only paints what the server sampled —
+  don't move the `readers()` call into the request path.
 - **All times are 24-hour**, on both pages, via `hourCycle: "h23"` in the
   shared `TIME_OPTS` at the top of each of `main.js` and `dashboard.js`. Use
   those options for any new timestamp rather than a bare `toLocaleTimeString()`,

@@ -158,6 +158,113 @@ def _read_piv_auth_cert_der(atr, connection) -> bytes | None:
         return bytes(certs[0][Attribute.VALUE])
 
 
+# --- reader presence -------------------------------------------------
+# Whether a reader is physically attached at all, which the tap path alone
+# can never tell you: an unplugged reader and a lab where nobody has tapped
+# yet look exactly the same from here. The kiosk shows this beside its clock
+# so an unattended board doesn't sit there for a week quietly accepting no
+# taps.
+
+# Sampled on a timer rather than on demand. readers() is a round trip to
+# pcscd, and /api/state is polled every 1.5s by the kiosk plus every 5s by
+# each open dashboard; sampling here also means a wedged pcscd stalls this
+# thread instead of a Flask request thread.
+READER_POLL_S = 10
+
+# How old the last sample may get before the status is reported as unknown
+# rather than as whatever it last was. If readers() ever blocks forever, the
+# alternative is a green dot that stays green because nothing is checking it
+# any more - the exact failure the indicator exists to rule out.
+READER_STALE_S = 60
+
+# status is one of:
+#   "ok"      - at least one reader is attached
+#   "down"    - no reader, or PC/SC itself is unreachable
+#   "unknown" - nothing is checking (no pyscard, or samples have gone stale)
+_reader_presence = {"status": "unknown", "detail": "not checked yet", "checked_at": None}
+_reader_presence_lock = threading.Lock()
+
+
+def get_reader_presence() -> dict:
+    """Latest reader-presence sample: {"status", "detail"}."""
+    with _reader_presence_lock:
+        status = _reader_presence["status"]
+        detail = _reader_presence["detail"]
+        checked_at = _reader_presence["checked_at"]
+
+    # checked_at is None only before the first sample, or when there is no
+    # watcher at all (no pyscard) - in both cases the status already says so.
+    if checked_at is not None:
+        age = time.monotonic() - checked_at
+        if age > READER_STALE_S:
+            return {"status": "unknown", "detail": f"last checked {age:.0f}s ago"}
+    return {"status": status, "detail": detail}
+
+
+def _sample_reader_presence() -> dict:
+    from smartcard.System import readers
+
+    try:
+        found = readers()
+    except Exception as e:
+        # pcscd not running, its socket gone, or the daemon wedged. From the
+        # kiosk's point of view that is the same outage as an unplugged
+        # reader - nobody can check in - so it reports the same way, with the
+        # reason kept in detail for the journal.
+        return {"status": "down", "detail": f"PC/SC unavailable: {e}"}
+
+    if not found:
+        return {"status": "down", "detail": "no reader attached"}
+
+    extra = f" (+{len(found) - 1} more)" if len(found) > 1 else ""
+    return {"status": "ok", "detail": f"{found[0]}{extra}"}
+
+
+def start_reader_watch(interval_s=READER_POLL_S):
+    """
+    Start the background thread that samples whether a reader is attached.
+
+    Returns the thread, or None when pyscard isn't installed (the dev-machine
+    case), where the status simply stays "unknown" - see start_cac_monitor().
+    """
+    if not _PYSCARD_AVAILABLE:
+        with _reader_presence_lock:
+            _reader_presence.update(
+                status="unknown",
+                detail="pyscard is not installed, so reader presence cannot be checked",
+                checked_at=None,
+            )
+        return None
+
+    def loop():
+        # Only transitions are logged. This samples every few seconds for
+        # weeks at a time, so an unconditional line per sample would be
+        # ~9,000 a day and would bury everything else in the journal.
+        last_status = None
+        while True:
+            try:
+                sample = _sample_reader_presence()
+            except Exception:
+                log.exception("Reader presence check failed")
+                sample = {"status": "unknown", "detail": "presence check failed"}
+
+            with _reader_presence_lock:
+                _reader_presence.update(sample, checked_at=time.monotonic())
+
+            if sample["status"] != last_status:
+                last_status = sample["status"]
+                if sample["status"] == "ok":
+                    log.info("Card reader present: %s", sample["detail"])
+                else:
+                    log.warning("Card reader unavailable: %s", sample["detail"])
+
+            time.sleep(interval_s)
+
+    thread = threading.Thread(target=loop, name="reader-watch", daemon=True)
+    thread.start()
+    return thread
+
+
 class _TapObserver(CardObserver):
     """
     Fires on_tap(edipi) whenever a new card is presented and identified.

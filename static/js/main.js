@@ -256,6 +256,34 @@ function showToast(event) {
   }
 }
 
+// --- card reader presence --------------------------------------------
+// The board is unattended: an unplugged reader, or a pcscd that died, looks
+// exactly like a quiet day unless the board says so. The server samples it
+// on a timer (cac_reader.start_reader_watch) and ships the result on
+// /api/state, so this side only paints it.
+
+const READER_LABELS = {
+  ok: "Reader ready",
+  down: "Reader offline",
+  unknown: "Reader unknown",
+};
+
+// Only the status drives the display, so that's the whole cache key - the
+// detail string (which reader, why it's down) is for the journal, not the
+// board. Without this compare the header would be rewritten every 1.5s.
+let lastReaderStatus = "";
+function renderReader(reader) {
+  const status = (reader && READER_LABELS[reader.status]) ? reader.status : "unknown";
+  if (status === lastReaderStatus) return;
+  lastReaderStatus = status;
+
+  const el = document.getElementById("reader-status");
+  el.textContent = READER_LABELS[status];
+  el.classList.toggle("is-ok", status === "ok");
+  el.classList.toggle("is-down", status === "down");
+  el.classList.toggle("is-unknown", status === "unknown");
+}
+
 function setReading(active) {
   document.getElementById("reading-overlay").classList.toggle("is-visible", active);
   syncOverlayState();
@@ -270,6 +298,7 @@ async function poll() {
     const res = await fetch("/api/state?src=kiosk");
     const data = await res.json();
     renderRoster(data.roster);
+    renderReader(data.reader);
     setReading(!!data.reading);
 
     const incomingId = data.last_event && data.last_event.event_id;

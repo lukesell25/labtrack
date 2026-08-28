@@ -126,6 +126,15 @@ removed. If nothing happens here, stop and troubleshoot at this level first
 (check `lsusb` sees the reader, check `systemctl status pcscd`) before
 worrying about the app — everything else depends on this working.
 
+Once the app is running, the same check is on the board itself: the kiosk
+header shows a green "Reader ready" beside the clock while a reader is
+attached, and a red "Reader offline" if it is unplugged or `pcscd` has
+died. That state is also in the journal — but only when it changes:
+
+```bash
+journalctl -u labtrack | grep -i "card reader"
+```
+
 ### 5. Check where OpenSC's PKCS#11 module actually landed
 
 ```bash
@@ -455,6 +464,7 @@ obviously related:
 | App events, errors, tracebacks | `app.py` | `journalctl -u labtrack` |
 | Health heartbeat, once a minute | `health.py` | `journalctl -u labtrack \| grep health` |
 | Errors the kiosk page saw | `report()` in `main.js` → `/api/client-log` | `journalctl -u labtrack \| grep client` |
+| Card reader plugged/unplugged | `start_reader_watch()` in `cac_reader.py` | `journalctl -u labtrack \| grep -i "card reader"` |
 | Chromium's own output | the `logger` pipe in `autostart/labwc-autostart` | `journalctl -t labtrack-chromium` |
 | OOM kills, undervoltage, resets | the kernel | `journalctl -k` |
 

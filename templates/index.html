@@ -11,7 +11,14 @@
   <main class="board">
     <header class="board__header">
       <div class="board__eyebrow">FALCON AI RESEARCH LAB</div>
-      <div class="board__clock" id="clock">--:--:--</div>
+      <div class="board__meta">
+        <!-- Whether a card reader is actually attached. Sampled server-side
+             (cac_reader.start_reader_watch) and delivered on /api/state; the
+             starting text is the "not yet polled" state, replaced within a
+             poll or two by renderReader(). -->
+        <div class="board__reader" id="reader-status">Reader</div>
+        <div class="board__clock" id="clock">--:--:--</div>
+      </div>
     </header>
 
     <section class="media" id="media">
