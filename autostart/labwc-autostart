@@ -29,6 +29,14 @@ done
 #   --disable-background-networking stops Chromium's periodic phone-home
 #   fetches, which is pure wasted CPU on an appliance showing one local page.
 #
+# Chromium's stderr is piped into the journal under the tag
+# labtrack-chromium (`journalctl -t labtrack-chromium`). Without this it
+# goes to the labwc session's own output and is effectively unreadable,
+# which matters because GPU and V4L2 decoder complaints surface there -
+# including anything the hardware video decoder has to say when the
+# background video misbehaves. `logger` is part of util-linux, always
+# present. Note the pipeline as a whole is backgrounded by the trailing &.
+#
 #   Deliberately NOT passing --ignore-gpu-blocklist: a chrome://gpu dump from
 #   this Pi (V3D 4.2.14.0, Mesa 26.2.0, Chrome 151) reports "Rasterization:
 #   Hardware accelerated on all pages" WITHOUT that flag, so the blocklist
@@ -47,4 +55,4 @@ chromium \
   --enable-gpu-rasterization \
   --disable-background-networking \
   --disable-features=Translate \
-  http://localhost:5000 &
+  http://localhost:5000 2>&1 | logger -t labtrack-chromium &

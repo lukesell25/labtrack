@@ -98,6 +98,19 @@ changing the video:
   branch on it too (below). The `error` handler removes the class again and
   does *not* retry: it's one hardcoded filename, so a failure repeats
   exactly.
+- **A 5s watchdog samples `currentTime` and reports `video-stall` if it has
+  not moved for 15s.** The decoder wedge described under Performance is
+  silent by construction — no `error`, no `stalled`, just frames that stop
+  arriving while the element still believes it is playing — so sampling is
+  the only way to observe it at all, and without this a frozen board is
+  indistinguishable from a working one to anything off the panel. On firing
+  it pauses the video and drops `has-bg`, degrading to the flat background
+  rather than leaving a dead frame up for the rest of the run. It
+  deliberately does not attempt recovery: the wedged decoder never comes
+  back, so a retry loop would only re-report the same stall forever. A
+  sibling timeout reports `video-never-started` when no first frame arrives
+  within 30s, which is what the non-faststart range-request stall looks like
+  from the page's side.
 - **Slide text is kept readable with a flat `rgba()` scrim
   (`.media__scrim`), never `backdrop-filter`.** Blurring live video every
   frame is the single most expensive thing this hardware could be asked to
@@ -241,9 +254,16 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   thread-shared state guarded by `_state_lock`: `_last_event` (so the kiosk
   can poll `/api/state` and detect a new event by comparing `event_id`) and
   `_reader_status["reading"]` (so the kiosk can show "reading card..."
-  between physical tap and PKCS#11 read completing). This state is
+  between physical tap and PKCS#11 read completing). It also holds
+  `_kiosk_status["last_poll"]`, stamped only by requests carrying
+  `?src=kiosk`, so the health heartbeat can tell a dead kiosk browser from a
+  live one — the dashboard polls the same endpoint from other PCs and must
+  not be able to mask it. This state is
   intentionally not persisted — only `events`/`members` in SQLite are durable.
-  `db.init_db()` and `_init_cac_monitor()` run at *import* time, not under
+  An `@app.errorhandler(Exception)` logs a traceback plus the offending
+  method and path for anything that escapes a route, passing `HTTPException`
+  straight through so ordinary 404s stay unlogged.
+  `db.init_db()`, `_init_cac_monitor()` and `start_health_monitor()` run at *import* time, not under
   `__main__`, so they also run under gunicorn — which is why
   `systemd/labtrack.service` pins `-w 1`. More than one worker would mean
   multiple CAC monitors fighting over the reader and per-worker copies of
@@ -270,6 +290,19 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   - `_read_piv_auth_cert_der` retries for ~3s waiting for a PKCS#11 token:
     PC/SC reports a card present as soon as it's electrically detected,
     before OpenSC has finished exposing it as a token.
+- **`health.py`** — daemon thread started at import time from `app.py`,
+  logging one `health ...` line a minute to the `labtrack.health` logger.
+  Pure `/proc`, `/sys` and `vcgencmd` reads, no dependencies. It exists for
+  post-mortems on multi-week runs: the failure modes that matter there
+  (Chromium leaking until the OOM killer fires, a marginal PSU browning the
+  Pi out) leave nothing in the app's own logs, so the trend line *is* the
+  evidence. Every probe is individually guarded and yields `?` on failure,
+  and the whole loop body is wrapped — a monitor that dies quietly partway
+  through a soak test is worse than no monitor at all. The line crosses to
+  WARNING when memory, disk, temperature, `vcgencmd get_throttled` or kiosk
+  silence look wrong, so a week-long run can be reviewed with `journalctl -p
+  warning`. Also served on demand at `/api/health`, and summarised across a
+  whole run by `scripts/soak-report.sh`.
 - **`database.py`** — all SQLite access goes through `get_conn()`, which
   keeps one connection per thread (`threading.local`) since sqlite3
   connections aren't safe to share across threads; this matters because the
@@ -315,6 +348,18 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   load, and `0` would make "no baseline" indistinguishable from a real
   first event. `dashboard.js` drives `templates/dashboard.html`: polls
   `/api/state` + `/api/weekly-hours` + `/api/events` every 5s.
+  - **Nothing reads the kiosk's browser console** — the Pi boots straight
+    into Chromium and runs unattended — so `main.js` posts anything worth
+    knowing to `/api/client-log` through `report(key, detail)`, which also
+    backs `window.onerror` and `unhandledrejection`. New kiosk failure paths
+    should call it rather than `console.error` alone. It throttles per key
+    (first occurrence immediately, then at most one per 5 minutes carrying a
+    count of what was suppressed) because everything it reports sits on a
+    1.5s or 5s timer — unthrottled, a single dead backend is ~57k identical
+    lines a day and buries whatever you were looking for. `app.py`
+    rate-limits again on its side as a backstop against a runaway client.
+    `dashboard.js` deliberately does *not* use this: it runs on a PC with a
+    human in front of it who can open devtools.
 - **Pi deployment** (`scripts/setup.sh`, `systemd/`, `autostart/`) — installs
   system packages, a systemd service (gunicorn, assumes path
   `/home/admin/labtrack`), a labwc (Wayland) autostart entry for kiosk-mode

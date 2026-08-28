@@ -57,9 +57,11 @@ labtrack/
   templates/                Kiosk + dashboard HTML
   static/                   CSS, JS, and a media/ folder for slide pictures
                             and the background video
+  health.py                 Once-a-minute health heartbeat for long runs
   systemd/labtrack.service   Runs the app on boot
   autostart/*.desktop       Launches Chromium kiosk mode on desktop login
   scripts/setup.sh          Installs everything below in one go
+  scripts/soak-report.sh    Summarises a long unattended run
 ```
 
 ## Step-by-step setup on the Pi
@@ -389,10 +391,120 @@ machine on the same network:
 http://<pi-ip-address>:5000/dashboard
 ```
 
+## Watching a long run
+
+The board is meant to sit powered on for weeks, and the failure modes that
+matter over that timescale are quiet ones: the video decoder wedging,
+Chromium leaking memory until the kernel kills it, a marginal power supply
+browning out the Pi at 3am. None of those announce themselves. This section
+is the setup that makes them visible after the fact.
+
+### One-time: make the journal survive a reboot
+
+**Do this before any long test.** Raspberry Pi OS ships journald with
+`Storage=auto` and no `/var/log/journal` directory, which means the journal
+lives in RAM and is **wiped on every boot** — so if the Pi crashes or reboots,
+the log explaining why is destroyed at exactly the moment you need it. Check
+which mode you are in:
+
+```bash
+journalctl --disk-usage
+```
+
+If that says anything about `/run/log/journal`, the logs are volatile. Fix it:
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo tee /etc/systemd/journald.conf.d/labtrack.conf >/dev/null <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=500M
+MaxRetentionSec=1month
+EOF
+sudo systemctl restart systemd-journald
+journalctl --disk-usage      # should now say /var/log/journal
+```
+
+The 500M cap keeps the SD card from filling up; a month of heartbeats and
+Chromium output fits comfortably inside it.
+
+### What gets logged
+
+Everything lands in the one journal, on a single timeline with the kernel's
+own messages, so an app error and an OOM kill three seconds later are
+obviously related:
+
+| Source | Where it comes from | Read it with |
+| --- | --- | --- |
+| App events, errors, tracebacks | `app.py` | `journalctl -u labtrack` |
+| Health heartbeat, once a minute | `health.py` | `journalctl -u labtrack \| grep health` |
+| Errors the kiosk page saw | `report()` in `main.js` → `/api/client-log` | `journalctl -u labtrack \| grep client` |
+| Chromium's own output | the `logger` pipe in `autostart/labwc-autostart` | `journalctl -t labtrack-chromium` |
+| OOM kills, undervoltage, resets | the kernel | `journalctl -k` |
+
+The heartbeat line looks like this, and is INFO normally, WARNING when
+something on it looks wrong:
+
+```
+INFO labtrack.health: health mem_avail=1204M mem_total=3792M app_mem=48.2M
+chromium_mem=612.4M chromium_procs=11 load1=0.42 temp=54.7C disk_free=21740M
+throttled=0x0 kiosk_idle=1s uptime=486213s
+```
+
+Two fields are worth knowing about specifically:
+
+- **`throttled`** is `vcgencmd get_throttled`. Anything other than `0x0` means
+  the power supply is sagging or the Pi is overheating; undervoltage is the
+  most common cause of a Pi that locks up or reboots with nothing in the logs,
+  and it is invisible any other way. It is decoded into plain words on the
+  same line when set.
+- **`kiosk_idle`** is how long since the kiosk page last polled. The browser
+  is the one part of the system that can die without anything erroring on the
+  server, so a growing number here means Chromium crashed or its renderer was
+  OOM-killed even though the app itself is fine. Over 120s and the heartbeat
+  becomes a WARNING.
+
+A one-off sample without an ssh session: `curl -s http://<pi>:5000/api/health`.
+
+### Reviewing the run
+
+```bash
+scripts/soak-report.sh "3 days ago"
+```
+
+That pulls out reboots, OOM kills, undervoltage events, app errors, anything
+the kiosk reported about itself, Chromium complaints, and the memory trend
+over the window — a steadily falling `mem_avail` or rising `chromium_mem`
+across days is the shape of a leak. With no argument it covers the last week.
+
+To watch live while you set things up:
+
+```bash
+sudo journalctl -u labtrack -t labtrack-chromium -f     # app + browser together
+sudo journalctl -u labtrack -p warning -f               # only things going wrong
+```
+
+### On the background video specifically
+
+The decoder wedge described in step 7 produces *no* error event — the picture
+just stops while the page still believes it is playing. `main.js` therefore
+watches `currentTime` on a 5s timer and reports `video-stall` if it hasn't
+moved for 15s, along with the `readyState` and where in the clip it died.
+When that fires it pauses the video and drops back to the flat background, so
+the board stays readable for the rest of the run instead of sitting on a dead
+frame. It deliberately does not retry: once that decoder has wedged it does
+not come back, so a retry loop would only report the same stall forever.
+
+Two related reports come from the same watchdog: `video-never-started` (no
+first frame within 30s — what the non-faststart range-request stall looks
+like) and `video-too-short` (a replacement clip shorter than `LOOP_TAIL_S`).
+
 ## Day-to-day maintenance
 
 - **Restart the app:** `sudo systemctl restart labtrack`
 - **View logs:** `sudo journalctl -u labtrack -f`
+- **Check on a long run:** `scripts/soak-report.sh` (see "Watching a long
+  run" above), or `curl -s http://localhost:5000/api/health` for one sample
 - **Manually toggle someone in/out** (if the reader is down, or for testing)
   without touching the card reader:
   ```bash

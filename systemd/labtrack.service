@@ -8,6 +8,10 @@ Type=simple
 User=admin
 WorkingDirectory=/home/admin/labtrack
 Environment=PATH=/home/admin/labtrack/venv/bin
+# Belt and braces so log lines reach journald promptly even if something
+# upstream leaves stderr block-buffered - during a multi-day soak test a
+# buffered final line is exactly the one you want after a crash.
+Environment=PYTHONUNBUFFERED=1
 # -w 1 is load-bearing, do NOT raise it: app.py starts the CAC monitor and
 # holds the last-event state at import time, so a second worker would mean a
 # second monitor fighting over the reader and a second copy of that state.

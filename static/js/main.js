@@ -13,6 +13,57 @@ const NOTE_PROMPT_TIMEOUT_MS = 15000;
 // first toast silently never shows - which is exactly the bug this fixes.
 let lastEventId = null;
 
+// --- error reporting -------------------------------------------------
+// Nothing reads this page's console: the Pi boots straight into Chromium
+// and runs unattended for weeks. So anything worth knowing gets posted to
+// /api/client-log, where it lands in the journal next to the app's own
+// lines and the kernel's (see "Watching a long run" in README.md).
+
+const CLIENT_LOG_THROTTLE_MS = 5 * 60 * 1000;
+const CLIENT_LOG_MAX_KEYS = 50;
+
+// key -> { last: when we last sent this key, suppressed: how many since }
+const reportedErrors = new Map();
+
+// Reports once per key immediately, then at most once per throttle window
+// with a count of what was suppressed. The throttling is the load-bearing
+// part: a failure that repeats every 1.5s (a dead backend, say) would
+// otherwise be ~57,000 identical log lines a day and would bury the one
+// event you actually wanted to find.
+function report(key, detail) {
+  try {
+    const now = Date.now();
+    const seen = reportedErrors.get(key);
+    if (seen && now - seen.last < CLIENT_LOG_THROTTLE_MS) {
+      seen.suppressed++;
+      return;
+    }
+    const count = seen ? seen.suppressed + 1 : 1;
+    // Bound the map: a failure that puts something variable in the key
+    // (a URL, a timestamp) would otherwise grow it without limit over a
+    // multi-week run. Dropping the counts is fine, this is a safety valve.
+    if (!seen && reportedErrors.size >= CLIENT_LOG_MAX_KEYS) reportedErrors.clear();
+    reportedErrors.set(key, { last: now, suppressed: 0 });
+
+    console.error(key, detail);
+    fetch("/api/client-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, detail: String(detail), count }),
+      keepalive: true,          // still goes out if the page is being torn down
+    }).catch(() => {});         // a failed report must never report its own failure
+  } catch (e) {
+    // Best effort only - reporting an error must never break the caller.
+  }
+}
+
+window.addEventListener("error", (e) => {
+  report("js-error", `${e.message} at ${e.filename}:${e.lineno}:${e.colno}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  report("unhandled-rejection", String(e.reason));
+});
+
 function fmtTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -128,7 +179,7 @@ function showToast(event) {
             body: JSON.stringify({ note }),
           });
         } catch (e) {
-          console.error("failed to save note", e);
+          report("note-save-failed", e);
         }
       }
       finish();
@@ -175,7 +226,11 @@ function setReading(active) {
 
 async function poll() {
   try {
-    const res = await fetch("/api/state");
+    // ?src=kiosk lets the server tell this page's polls apart from the
+    // dashboard's, so the health heartbeat can report a kiosk that has
+    // stopped polling (a Chromium crash or renderer OOM looks like nothing
+    // at all from the server side otherwise).
+    const res = await fetch("/api/state?src=kiosk");
     const data = await res.json();
     renderRoster(data.roster);
     setReading(!!data.reading);
@@ -191,7 +246,7 @@ async function poll() {
       lastEventId = incomingId;
     }
   } catch (e) {
-    console.error("poll failed", e);
+    report("poll-failed", e);
   }
 }
 setInterval(poll, POLL_MS);
@@ -289,7 +344,7 @@ function restartRotation() {
 // leaving a broken-image box on the board. dataset.file is cleared so the
 // next time this objective comes around it retries the load.
 slideImageEl.addEventListener("error", () => {
-  console.error("objective image failed to load:", slideImageEl.currentSrc);
+  report("objective-image-failed", slideImageEl.currentSrc);
   slideImageEl.dataset.file = "";
   slideEl.classList.remove("has-image");
 });
@@ -305,7 +360,8 @@ bgVideoEl.addEventListener("loadeddata", () => document.body.classList.add("has-
 // fails once it will fail identically every time. Drop back to the flat panel
 // background and leave the reason in the console.
 bgVideoEl.addEventListener("error", () => {
-  console.error("background video failed to load:", bgVideoEl.currentSrc);
+  const code = bgVideoEl.error ? bgVideoEl.error.code : "?";
+  report("video-load-failed", `${bgVideoEl.currentSrc} (MediaError code ${code})`);
   document.body.classList.remove("has-bg");
 });
 
@@ -319,14 +375,70 @@ bgVideoEl.addEventListener("timeupdate", () => {
 
 bgVideoEl.addEventListener("loadedmetadata", () => {
   if (bgVideoEl.duration <= LOOP_TAIL_S) {
-    console.error(
+    report("video-too-short",
       `background video is only ${bgVideoEl.duration.toFixed(1)}s; it must be ` +
       `longer than ${LOOP_TAIL_S}s or it will freeze on the Pi (README step 7)`);
   }
 });
 
+// --- background video watchdog ---------------------------------------
+// The decoder wedge described above announces itself with nothing at all:
+// no `error` event, no `stalled`, just frames that stop arriving while the
+// element still believes it is playing. Sampling currentTime is the only
+// way to see it from here. This runs every VIDEO_CHECK_MS and reads two
+// properties - it is nowhere near the render path and costs nothing.
+const VIDEO_CHECK_MS = 5000;
+const VIDEO_STALL_MS = 15000;      // 3 consecutive dead samples before reporting
+const VIDEO_START_TIMEOUT_MS = 30000;
+
+let lastVideoTime = -1;
+let videoStalledSince = 0;
+
+setInterval(() => {
+  // No has-bg means either no video configured or one we've already given
+  // up on - either way there is nothing left to watch.
+  if (!document.body.classList.contains("has-bg")) return;
+  if (bgVideoEl.paused || bgVideoEl.ended) return;
+
+  if (bgVideoEl.currentTime !== lastVideoTime) {
+    lastVideoTime = bgVideoEl.currentTime;
+    videoStalledSince = 0;
+    return;
+  }
+  if (!videoStalledSince) {
+    videoStalledSince = Date.now();
+    return;
+  }
+  if (Date.now() - videoStalledSince < VIDEO_STALL_MS) return;
+
+  report("video-stall",
+    `frozen at ${bgVideoEl.currentTime.toFixed(2)}s of ` +
+    `${bgVideoEl.duration.toFixed(2)}s, readyState=${bgVideoEl.readyState}, ` +
+    `networkState=${bgVideoEl.networkState}`);
+
+  // No reload attempt on purpose: once the Pi's hardware decoder has wedged
+  // it does not come back, so retrying would only re-report the same stall
+  // forever. Pausing releases the decoder and dropping has-bg leaves a
+  // readable flat board rather than a dead frame for the rest of the run.
+  bgVideoEl.pause();
+  document.body.classList.remove("has-bg");
+  videoStalledSince = 0;
+}, VIDEO_CHECK_MS);
+
 if (BACKGROUND_VIDEO) {
   bgVideoEl.src = `/static/media/${BACKGROUND_VIDEO}`;
+
+  // A video that never produces a first frame fires neither `loadeddata`
+  // nor `error` - which is exactly what the non-faststart range-request
+  // stall looks like (see Performance in CLAUDE.md). Without this check it
+  // would be indistinguishable from having no background configured.
+  setTimeout(() => {
+    if (!document.body.classList.contains("has-bg")) {
+      report("video-never-started",
+        `no first frame after ${VIDEO_START_TIMEOUT_MS}ms; ` +
+        `readyState=${bgVideoEl.readyState}, networkState=${bgVideoEl.networkState}`);
+    }
+  }, VIDEO_START_TIMEOUT_MS);
 }
 
 async function loadObjectives() {
@@ -341,7 +453,7 @@ async function loadObjectives() {
     // rotation here costs nothing in the steady state.
     restartRotation();
   } catch (e) {
-    console.error("failed to load objectives", e);
+    report("objectives-load-failed", e);
     // Nothing to show yet; the panel keeps whatever is already up (on first
     // load, that's the "add objectives" placeholder) and retries in 60s.
   }

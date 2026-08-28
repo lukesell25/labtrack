@@ -1,15 +1,22 @@
 import json
 import logging
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
+from werkzeug.exceptions import HTTPException
 
 import database as db
 from cac_reader import start_cac_monitor
+from health import start_health_monitor, sample as health_sample
 
-logging.basicConfig(level=logging.INFO)
+# Deliberately no timestamp in the format: in production every line goes to
+# stderr, which systemd stamps and indexes itself, so a second timestamp is
+# just noise in `journalctl` output. Use `journalctl -o short-iso` if you
+# want the precise time. See README "Watching a long run".
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("labtrack")
 
 app = Flask(__name__)
@@ -26,6 +33,14 @@ _last_event = {"id": 0}
 # PKCS#11 read finishing, roughly 1-3 seconds). Lets the kiosk show "reading
 # card..." instead of leaving the person wondering if the tap registered.
 _reader_status = {"reading": False}
+
+# When the kiosk page last polled /api/state. The kiosk browser is the one
+# part of this system that can die without anything on this end erroring -
+# a renderer OOM or a Chromium crash just stops the polls - so the health
+# heartbeat reports how long it has been quiet. Only requests tagged
+# ?src=kiosk count; the dashboard polls the same endpoint from other PCs and
+# must not be able to mask a dead kiosk.
+_kiosk_status = {"last_poll": None}
 
 UNRECOGNIZED_MESSAGES = {
     "unreadable": "Could not read card",
@@ -94,9 +109,19 @@ def dashboard():
     return render_template("dashboard.html")
 
 
+def _kiosk_idle_s():
+    """Seconds since the kiosk last polled, or None if it never has."""
+    with _state_lock:
+        last = _kiosk_status["last_poll"]
+    return None if last is None else time.monotonic() - last
+
+
 @app.route("/api/state")
 def api_state():
+    from_kiosk = request.args.get("src") == "kiosk"
     with _state_lock:
+        if from_kiosk:
+            _kiosk_status["last_poll"] = time.monotonic()
         last_event = dict(_last_event)
         reading = _reader_status["reading"]
     return jsonify(
@@ -153,6 +178,78 @@ def api_manual_toggle():
     return jsonify(event)
 
 
+# --- diagnostics ------------------------------------------------------
+# The kiosk runs headless: nothing reads its browser console, so anything
+# the frontend notices has to be posted back here to reach the journal.
+
+# A runaway client (a failure that repeats every few seconds for a week)
+# must not be able to flood the journal, so drop anything past this rate and
+# report how much was dropped once the window closes. main.js throttles per
+# message as well, so hitting this cap at all means something unexpected.
+_CLIENT_LOG_MAX_PER_MIN = 30
+_client_log_lock = threading.Lock()
+_client_log_window = {"start": 0.0, "logged": 0, "dropped": 0}
+
+
+def _client_log_allowed():
+    now = time.monotonic()
+    with _client_log_lock:
+        window = _client_log_window
+        if now - window["start"] > 60:
+            dropped = window["dropped"]
+            window.update(start=now, logged=0, dropped=0)
+            if dropped:
+                log.warning("client-log: dropped %d message(s) over the rate limit", dropped)
+        if window["logged"] >= _CLIENT_LOG_MAX_PER_MIN:
+            window["dropped"] += 1
+            return False
+        window["logged"] += 1
+        return True
+
+
+@app.route("/api/client-log", methods=["POST"])
+def api_client_log():
+    """
+    Errors reported by the kiosk page (see report() in main.js): JS
+    exceptions, failed polls, and the background-video stall watchdog. The
+    video freeze in particular emits no error event of its own, so this
+    endpoint is the only way it ever reaches a log.
+    """
+    payload = request.json or {}
+    key = str(payload.get("key", "unknown"))[:80]
+    detail = str(payload.get("detail", ""))[:500]
+    count = payload.get("count")
+    if _client_log_allowed():
+        repeat = f" (x{count} since last report)" if isinstance(count, int) and count > 1 else ""
+        log.warning("client %s: %s%s", key, detail, repeat)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/health")
+def api_health():
+    """
+    One health sample on demand - the same line the heartbeat thread writes
+    every minute, for checking the Pi from the dashboard machine without an
+    ssh session.
+    """
+    message, is_warning, concerns = health_sample(_kiosk_idle_s())
+    return jsonify({"summary": message, "ok": not is_warning, "concerns": concerns})
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(e):
+    """
+    Anything that escapes a route: log it with a traceback and which request
+    caused it, rather than letting Flask return a bare 500 with the reason
+    visible nowhere. HTTPExceptions (404s, 405s) are the framework working
+    as intended, so they pass straight through unlogged.
+    """
+    if isinstance(e, HTTPException):
+        return e
+    log.exception("Unhandled error serving %s %s", request.method, request.path)
+    return jsonify({"error": "internal error"}), 500
+
+
 # Keep references at module scope so the monitor/observer aren't GC'd.
 _cac_monitor = None
 _cac_observer = None
@@ -180,6 +277,7 @@ def _init_cac_monitor():
 
 db.init_db()
 _init_cac_monitor()
+start_health_monitor(kiosk_idle_fn=_kiosk_idle_s)
 
 
 if __name__ == "__main__":

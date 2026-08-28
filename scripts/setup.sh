@@ -36,6 +36,21 @@ else
   echo "    WARNING: opensc-pkcs11.so not found. Check the opensc package installed correctly."
 fi
 
+echo "==> Making the systemd journal persistent across reboots"
+# Raspberry Pi OS defaults to Storage=auto with no /var/log/journal, which
+# puts the journal in RAM - so it is wiped on every boot, destroying the log
+# that explains a crash at exactly the moment you need it. The size cap keeps
+# it off the SD card's throat. See "Watching a long run" in README.md.
+sudo mkdir -p /var/log/journal
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/labtrack.conf >/dev/null <<'EOF'
+[Journal]
+Storage=persistent
+SystemMaxUse=500M
+MaxRetentionSec=1month
+EOF
+sudo systemctl restart systemd-journald
+
 echo "==> Installing systemd service"
 sudo cp systemd/labtrack.service /etc/systemd/system/labtrack.service
 sudo systemctl daemon-reload
@@ -60,3 +75,7 @@ echo "  2. Plug in the USB smart card reader, then run: pcsc_scan"
 echo "     (tap a CAC and confirm the reader + card are detected before trusting the app)"
 echo "  3. Reboot: sudo reboot"
 echo "     The Pi should boot to desktop and Chromium should launch in kiosk mode automatically."
+echo ""
+echo "  To watch a long unattended run:"
+echo "    sudo journalctl -u labtrack -t labtrack-chromium -f   # app + browser"
+echo "    ./scripts/soak-report.sh \"2 days ago\"                # summary of a run"
