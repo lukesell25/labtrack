@@ -275,17 +275,68 @@ body.has-bg .media__scrim {
   display: flex;
   align-items: center;
   gap: 1rem;
+  /* A grid item refuses to shrink below its min-content width unless told
+     otherwise, and here min-content is however wide the longest name renders.
+     Without this the 1fr tracks stop shrinking once they hit that floor and
+     the strip runs off the side of the screen instead of dividing the width
+     evenly - and since <body> is overflow:hidden, the last member is simply
+     cut off the board with nothing to indicate it. Measured at 1080p: the
+     floor bit at 6 members with the type scale below (and at 8 even before
+     it). .roster__meta's min-width:0 is the same fix one level down, for the
+     flex context inside the card; this one is for the grid context outside
+     it. The name's ellipsis then does the rest. */
+  min-width: 0;
 }
 
 /* The strip is sized by its tallest card, and a card grows a third line only
-   when that member is out *with* a checkout note - so without this the whole
-   bottom bar silently changed height (88px vs 108px at 1080p) as people came
-   and went, which reads as the board having shrunk. Pin it to the taller of
-   the two so the layout is stable whatever the roster data happens to be.
-   Kiosk only: the dashboard lays the same cards out in a multi-row grid
-   where a fixed floor would just add dead space. */
+   when that member is out *with* a checkout note - so without a floor the
+   whole bottom bar silently changed height (88px vs 108px at 1080p) as people
+   came and went, which reads as the board having shrunk. Pin it to the taller
+   of the two so the layout is stable whatever the roster data happens to be.
+
+   The type below is scaled up to use that height rather than float in it -
+   the board is read from across the room - and paid for out of the card's
+   vertical padding so the bar itself stays 6.75rem. The ceiling is the
+   three-line card (name + status + checkout note): at these sizes it measures
+   ~76px inside ~79px of content box, and one step larger pushes it past the
+   floor, at which point the bar starts growing again and the wobble this
+   min-height exists to prevent comes back. Measured at 1920x1080, which is
+   what ships - re-measure there, not on the dev ultrawide, before changing
+   any of these five values.
+
+   Kiosk only, all of it: the dashboard lays the same cards out in a
+   multi-row grid, read from a foot away, where this would just be shouting. */
 .kiosk .roster__card {
   min-height: 6.75rem;
+  padding: 0.9rem 1.5rem;
+}
+
+.kiosk .roster__ring {
+  width: 20px;
+  height: 20px;
+}
+
+.kiosk .roster__name {
+  font-size: 1.75rem;
+}
+
+.kiosk .roster__status {
+  font-size: 1.1rem;
+  /* The name and the note are both nowrap+ellipsis; this line was not, which
+     made it the one piece of a card that could still wrap to a second line
+     once the cards got narrow - silently adding ~20px to every card and
+     pushing the strip past its pinned height (measured: 109px -> 126px at
+     eight members). Clipping "IN LAB · 09:14" is the right failure on a board
+     read from across the room; reflowing the whole bottom of it is not.
+     Kiosk only - the dashboard has no pinned height and is read close up, so
+     it keeps wrapping and shows the full "since" timestamp. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kiosk .roster__note {
+  font-size: 1.15rem;
 }
 
 .roster__ring {
