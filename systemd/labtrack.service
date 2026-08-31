@@ -22,7 +22,12 @@ Environment=PYTHONUNBUFFERED=1
 # second monitor fighting over the reader and a second copy of that state.
 # --threads lets the one worker serve the kiosk's 1.5s poll without queueing
 # behind a dashboard request from another PC (the sync worker is serial).
-ExecStart=/home/admin/labtrack/venv/bin/gunicorn -w 1 --threads 4 -b 127.0.0.1:5000 app:app
+# 0.0.0.0 so the dashboard is reachable from other PCs on the lab network;
+# on loopback only, the kiosk works and nothing else can connect. Everything
+# arriving from off the Pi has to pass the shared password in
+# config/dashboard.key - see webauth.py. Note that binding a proxy in front
+# of this would make every request look local and disable that check.
+ExecStart=/home/admin/labtrack/venv/bin/gunicorn -w 1 --threads 4 -b 0.0.0.0:5000 app:app
 Restart=on-failure
 RestartSec=3
 

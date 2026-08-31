@@ -543,6 +543,37 @@ machine on the same network:
 http://<pi-ip-address>:5000/dashboard
 ```
 
+The browser will ask for a password. Leave the username blank - only the
+password is checked. The Pi generates one the first time the app starts;
+read it on the Pi with:
+
+```bash
+cat ~/labtrack/config/dashboard.key
+```
+
+To set one people can remember instead, write it into that file and restart
+(`sudo systemctl restart labtrack`). It is read once at startup, so a change
+needs the restart. Keep the file mode at 0600, and don't commit it - it's
+gitignored, and it is per-Pi.
+
+The kiosk itself is never prompted: requests from the Pi are exempt, so the
+board keeps working through all of this. Everything from off the Pi needs
+the password, including `/api/manual-toggle` - without that, anyone on the
+lab network could check people in and out.
+
+**This is a lock on the door, not an encrypted tunnel.** There is no HTTPS
+on this hop, so the password and the page contents cross the network in the
+clear and anyone able to sniff the lab network can read both. That's an
+accepted trade for an attendance board on a trusted LAN. If you need more
+than that, the options in rough order of effort are: an ssh tunnel from the
+viewing PC (`ssh -L 5000:localhost:5000 admin@<pi-ip>`, then browse
+`http://localhost:5000/dashboard` - works today with no server change, but
+one person at a time), Tailscale or another WireGuard mesh on the Pi and
+each viewing PC, or a TLS-terminating reverse proxy. If you ever do put a
+proxy in front, note that it breaks the loopback exemption: every request
+would then appear to come from the Pi itself and skip the password entirely
+(see the comment in `webauth.py`).
+
 ## Checking in without a card
 
 Tapping a CAC is the normal path. When that isn't possible - the reader is
@@ -654,7 +685,10 @@ Two fields are worth knowing about specifically:
   OOM-killed even though the app itself is fine. Over 120s and the heartbeat
   becomes a WARNING.
 
-A one-off sample without an ssh session: `curl -s http://<pi>:5000/api/health`.
+A one-off sample without an ssh session:
+`curl -s -u :"$(cat dashboard.key)" http://<pi>:5000/api/health` - requests from
+off the Pi need the dashboard password (step 9); on the Pi itself the bare
+`curl -s http://localhost:5000/api/health` still works.
 
 **If a field reads `?`** it means that probe could not be taken, not that the
 value was zero — and the heartbeat says why once per boot, at WARNING:

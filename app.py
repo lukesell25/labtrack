@@ -5,11 +5,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 import database as db
 import identity
+import webauth
 from cac_reader import get_reader_presence, start_cac_monitor, start_reader_watch
 from health import start_health_monitor, sample as health_sample
 
@@ -110,6 +111,29 @@ def _handle_tap(edipi: str):
     log.info("%s checked %s at %s", event["display_name"], event["action"], event["timestamp"])
     _set_reading(False)
     _push_event(event["display_name"], event["action"], checkin_event_id=event["checkin_event_id"])
+
+
+@app.before_request
+def _require_dashboard_password():
+    """
+    Everything off this Pi needs the shared password (see webauth.py). The
+    kiosk browser is on the Pi and is exempt - it runs unattended and cannot
+    answer a prompt.
+
+    This guards the API as much as the page: /api/manual-toggle can check
+    anybody in or out, and the app listens on the whole lab network.
+    """
+    if webauth.is_local(request.remote_addr):
+        return None
+    if webauth.check(request.authorization and request.authorization.password):
+        return None
+    # The WWW-Authenticate header is what makes the browser show its own
+    # password box, which is why this needs no login page of its own.
+    return Response(
+        "LabTrack: password required\n",
+        401,
+        {"WWW-Authenticate": 'Basic realm="LabTrack"'},
+    )
 
 
 @app.route("/")
@@ -320,6 +344,10 @@ def _init_cac_monitor():
 
 
 db.init_db()
+# Read (and, on a first run, create) the dashboard password at startup, so
+# the file exists and its one-time warning lands at boot rather than
+# whenever the first request from another PC happens to arrive.
+webauth.load_password()
 _init_cac_monitor()
 # Deliberately started even when _init_cac_monitor() failed: a Pi with no
 # working monitor is exactly when the board needs to say the reader is down.

@@ -14,3 +14,7 @@ static/media/*.webm
 # The roster hashing key. Losing it means no card matches; leaking it
 # alongside config/members.json is the one thing that weakens the hashes.
 config/roster.key
+
+# The shared password for viewing the dashboard from another PC. Generated
+# on first run; per-Pi, so it never belongs in the repo.
+config/dashboard.key

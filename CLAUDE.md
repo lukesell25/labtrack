@@ -8,7 +8,7 @@ A Flask app for a Raspberry Pi that identifies lab members by tapping a DoD
 CAC (smart card) on a USB reader (no PIN), logs check-in/check-out events to
 SQLite, drives an always-on kiosk display (status board / screensaver +
 toast confirmation), and serves a dashboard viewable from other PCs on the
-network.
+network behind a shared password (see `webauth.py`).
 
 ## Developing locally (off the Pi)
 
@@ -419,6 +419,38 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     arrived from git carrying another machine's hashes). The key is
     gitignored, so a clone never brings it along — that second case is the
     normal way to get this wrong.
+- **`webauth.py`** — the shared password guarding everything that isn't the
+  kiosk. The service binds `0.0.0.0` so the dashboard is readable from other
+  PCs, which also exposes `/api/manual-toggle` to the lab network, so a
+  single `@app.before_request` hook in `app.py` demands HTTP Basic auth.
+  Three things hold it together:
+  - **Requests from the Pi are exempt**, because the kiosk Chromium loads
+    `http://localhost:5000` and cannot answer a password prompt. Nothing
+    off-box can claim that: the kernel drops a packet arriving on a real
+    interface with a loopback source. That reasoning depends on gunicorn
+    holding the listening socket itself — **putting nginx or Caddy in front
+    would make every request look local and silently disable the password
+    for the whole network.** It fails open, so it needs saying twice.
+  - **The password is stored in the clear and must not be hashed.** Reusing
+    `identity.hash_edipi` is the obvious move and the wrong one: scrypt is
+    100-200ms on a Pi and `dashboard.js` polls three endpoints every 5s, so
+    each open dashboard would hash ~120ms out of every second on a Flask
+    request thread — the case Performance rules out outright.
+    `secrets.compare_digest` is microseconds and still constant-time, and
+    with no TLS on the hop the wire is the weak link, not a 0600 file.
+  - **An empty key file denies everything** rather than accepting anything.
+    `compare_digest("", "")` is True, so a truncated or unreadable file would
+    otherwise let the whole network in with no password — the one failure
+    here that looks exactly like the feature working.
+
+  `config/dashboard.key` is generated with a random value on first start
+  (0600, gitignored, per-Pi) and cached at import, so changing it is a
+  restart. The generated value is deliberately *not* logged — unlike
+  `roster.key`'s warning, which names a path to back up, this one would put
+  a live credential in the journal. What this buys is a lock against people
+  who wander onto the lab network; it is not confidentiality, since plain
+  HTTP carries the password and the page in the clear. See README step 9 for
+  the stronger options.
 - **`database.py`** — all SQLite access goes through `get_conn()`, which
   keeps one connection per thread (`threading.local`) since sqlite3
   connections aren't safe to share across threads; this matters because the
@@ -585,7 +617,9 @@ The roster stores hashed EDIPIs (see `identity.py` above), so the ID numbers
 exist only on the cards themselves — not in the config file, the database, or
 the journal (`_handle_tap()` logs an 8-character hash prefix for an unknown
 card, enough to correlate repeat taps, and never the number). Display names
-are not protected and are still plainly in the repo. This repo is public, and
+are not protected and are still plainly in the repo, and the dashboard
+password in `config/dashboard.key` protects access, not the traffic — it
+crosses the network as plain HTTP (`webauth.py`). This repo is public, and
 the plaintext EDIPIs it used to carry were purged from history with
 `git filter-repo`; don't reintroduce a real one, in a config file, a test, or
 a comment example — `cac_reader.py`'s UPN samples are deliberately fake.
