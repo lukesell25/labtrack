@@ -65,6 +65,7 @@ labtrack/
   identity.py               One-way hashing of EDIPIs for the roster
   scripts/setup.sh          Installs everything below in one go
   scripts/add-member.py     Adds a member without their EDIPI hitting disk
+  scripts/add-event.py      Logs a check-in/out at a time you name
   scripts/soak-report.sh    Summarises a long unattended run
 ```
 
@@ -652,6 +653,18 @@ accruing. That's unchanged by this timer; it's the same as any other restart.
   ```
   (member IDs are assigned in the order they appear in `config/members.json`,
   starting at 1 — check `/api/state` to confirm which id maps to whom.)
+- **Log someone in/out at a past time** (the reader was down, or they forgot
+  to tap) — `manual-toggle` above always stamps the current time, so use this
+  instead when the time matters:
+  ```bash
+  python3 scripts/add-event.py "Ada Vance" in  "2026-08-27 08:15"
+  python3 scripts/add-event.py "Ada Vance" out "2026-08-27 16:40" --note "left early"
+  ```
+  It takes a name rather than an id (`--list` prints the roster), previews the
+  event against the ones either side of it, and warns before writing if the
+  result would break the in/out pairing the hours report depends on. Add both
+  halves of a shift: a lone `in` counts as time in the lab up to now. No
+  restart needed — the kiosk and dashboard pick it up on their next poll.
 - **Database** lives at `labtrack.db` in the project folder (plain SQLite —
   `sqlite3 labtrack.db` to poke at it directly if needed).
 

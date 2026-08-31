@@ -368,6 +368,14 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   optional checkout comment). `get_weekly_hours()` computes hours by pairing
   consecutive in/out events over the last 7 days, counting an unmatched
   trailing `in` up to now.
+  - Backfilling attendance by hand is `scripts/add-event.py` (name, `in`/`out`,
+    timestamp), for a reader outage or a missed tap. `/api/manual-toggle` can't
+    do it: it stamps `datetime.now()` and flips whatever the current status is.
+    Because the pairing above is positional, an event inserted into the middle
+    of an existing sequence can silently unpair it, so the script previews the
+    insert against its neighbours and warns about a repeated action, an
+    unmatched trailing `in`, or a note on an `in` (never displayed) before
+    committing.
   - **Schema changes need a hand-written migration.** `init_db()`'s
     `CREATE TABLE IF NOT EXISTS` is a no-op on existing installs, so adding
     a column means a `_migrate_*` helper that checks
