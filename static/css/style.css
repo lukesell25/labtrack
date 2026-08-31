@@ -41,9 +41,19 @@ body.kiosk {
   cursor: none;
 }
 
-/* Toggled from main.js while the note prompt is up - a :has() selector on
-   <body> would re-run on every roster re-render. */
-body.kiosk.is-note-prompt {
+/* The pointer is hidden by default (above) and revealed by a class, never by
+   a :has() selector on <body> - that would re-run selector matching on every
+   roster re-render, which is on a 1.5s timer.
+
+   has-pointer follows the mouse itself: main.js sets it on movement and drops
+   it again after POINTER_IDLE_MS, so the roster strip can be clicked without
+   leaving a pointer parked on an unattended board for a week. The other two
+   are states where a pointer must be available regardless of when the mouse
+   last moved - both put controls on screen and then wait for someone to use
+   them. */
+body.kiosk.has-pointer,
+body.kiosk.is-note-prompt,
+body.kiosk.is-confirm {
   cursor: auto;
 }
 
@@ -326,6 +336,17 @@ body.has-bg .media__scrim {
   display: flex;
   align-items: center;
   gap: 1rem;
+  /* The kiosk renders each card as a <button> (click your name to check in
+     without a card); the dashboard still renders plain divs. These four undo
+     the UA button styling so both come out identical - without them the kiosk
+     strip picks up a native border, centred small system text and a grey
+     face. Harmless on the dashboard's divs. */
+  appearance: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  width: 100%;
   /* A grid item refuses to shrink below its min-content width unless told
      otherwise, and here min-content is however wide the longest name renders.
      Without this the 1fr tracks stop shrinking once they hit that floor and
@@ -360,6 +381,23 @@ body.has-bg .media__scrim {
 .kiosk .roster__card {
   min-height: 6.75rem;
   padding: 0.9rem 1.5rem;
+}
+
+/* Click feedback for the no-card check-in path. Gated on has-pointer so the
+   card doesn't light up under a cursor that isn't being shown, and a flat
+   background swap rather than anything that rasterizes (Performance above).
+   Focus is an outline, not a box-shadow, for the same reason. */
+body.kiosk.has-pointer .roster__card {
+  cursor: pointer;
+}
+
+body.kiosk.has-pointer .roster__card:hover {
+  background: var(--graphite-700);
+}
+
+.kiosk .roster__card:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
 }
 
 .kiosk .roster__ring {
@@ -440,6 +478,19 @@ body.has-bg .media__scrim {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Shares the note line rather than taking one of its own - the card's height
+   is pinned to three lines, and a manual checkout can carry both. Amber and
+   monospaced to read as a machine-made mark, not as something the person
+   typed; upright because .roster__note is italic. */
+.roster__nocard {
+  font-family: var(--mono);
+  font-style: normal;
+  font-size: 0.9em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--amber);
 }
 
 /* ---- toast (check-in/out confirmation) --------------------------- */
@@ -526,7 +577,8 @@ body.has-bg .media__scrim {
   gap: 0.75rem;
 }
 
-.toast__note-btn {
+.toast__note-btn,
+.confirm__btn {
   font-family: var(--mono);
   font-size: 0.85rem;
   letter-spacing: 0.04em;
@@ -544,7 +596,19 @@ body.has-bg .media__scrim {
   outline-offset: 1px;
 }
 
-.toast__note-btn--save {
+/* :focus-visible, unlike the note prompt's plain :focus above. The dialog
+   focuses Cancel as it opens, and painting an amber ring on it there puts a
+   second amber-outlined button next to the amber Confirm - it reads as the
+   selected one. Chromium only matches :focus-visible on a programmatic focus
+   when the last input was a keyboard, which is exactly when the ring is
+   wanted; a mouse user gets the two buttons as designed. */
+.confirm__btn:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+.toast__note-btn--save,
+.confirm__btn--go {
   border-color: var(--amber);
   color: var(--amber);
 }
@@ -553,6 +617,66 @@ body.has-bg .media__scrim {
   font-family: var(--mono);
   color: var(--text-mid);
   font-size: 1.1rem;
+}
+
+/* ---- click-to-toggle confirmation -------------------------------- */
+/* Same full-screen treatment as the toast, and deliberately between the two
+   other overlays in the stack: above the reading overlay (a card presented
+   mid-dialog is the more important thing to say) and below the toast that
+   supersedes it. */
+.confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 58;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  background: var(--graphite-900);
+  display: none;
+}
+
+.confirm.is-visible {
+  display: flex;
+}
+
+.confirm__name {
+  font-size: 3.2rem;
+  font-weight: 700;
+}
+
+.confirm__action {
+  font-family: var(--mono);
+  font-size: 1.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--phosphor);
+}
+
+/* Checking out is amber wherever it appears on this board - see .toast.is-out. */
+.confirm.is-out .confirm__action {
+  color: var(--amber);
+}
+
+.confirm__hint {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  color: var(--text-low);
+  margin-top: 0.25rem;
+}
+
+.confirm__actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.75rem;
+}
+
+/* Bigger than the note prompt's buttons: those are typed at from arm's
+   length after a tap, these are mouse targets on a wall-mounted panel. */
+.confirm__btn {
+  font-size: 1.05rem;
+  padding: 0.8rem 1.75rem;
 }
 
 /* ---- dashboard --------------------------------------------------- */
@@ -564,6 +688,7 @@ body.has-bg .media__scrim {
    the whole board underneath (Performance above). The cost only applies
    while an overlay is actually up - 4s per tap, or 15s for a note prompt. */
 body.has-bg .toast,
+body.has-bg .confirm,
 body.has-bg .reading-overlay {
   background: rgba(14, 17, 22, 0.72);
 }

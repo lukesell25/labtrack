@@ -116,6 +116,17 @@ function renderClock() {
 setInterval(renderClock, 1000);
 renderClock();
 
+// The third line of a roster card, when there is one. Both things that can
+// appear there share one line rather than taking one each: the card's height
+// is pinned to three lines (see .kiosk .roster__card in style.css), and a
+// manual checkout can carry a typed note as well as the no-card mark.
+function rosterNote(m) {
+  const parts = [];
+  if (m.manual) parts.push('<span class="roster__nocard">No card</span>');
+  if (m.note) parts.push(escapeHtml(m.note));
+  return parts.length ? `<div class="roster__note">${parts.join(" · ")}</div>` : "";
+}
+
 let lastRosterJson = "";
 function renderRoster(roster) {
   // Today's date is part of the cache key, not just the roster data: what
@@ -129,16 +140,23 @@ function renderRoster(roster) {
   if (json === lastRosterJson) return;
   lastRosterJson = json;
 
+  // A real <button> rather than a div with a click handler: the card is an
+  // actual control now (click your name to check yourself in without a card),
+  // and this gets focus, Enter/Space and the accessible role for free if a
+  // keyboard is ever plugged into the kiosk. The strip is rebuilt wholesale on
+  // every change, so the click handler is delegated to the container below
+  // rather than reattached per card.
   const el = document.getElementById("roster");
   el.innerHTML = roster.map(m => `
-    <div class="roster__card ${m.status === 'in' ? 'is-in' : ''}">
+    <button type="button" class="roster__card ${m.status === 'in' ? 'is-in' : ''}"
+            data-member-id="${m.id}">
       <div class="roster__ring"></div>
       <div class="roster__meta">
         <div class="roster__name">${escapeHtml(m.display_name)}</div>
         <div class="roster__status">${m.status === 'in' ? 'In lab' : 'Out'}${m.since ? ' · ' + fmtTime(m.since) : ''}</div>
-        ${m.note ? `<div class="roster__note">${escapeHtml(m.note)}</div>` : ''}
+        ${rosterNote(m)}
       </div>
-    </div>
+    </button>
   `).join("");
 }
 
@@ -150,6 +168,7 @@ function renderRoster(roster) {
 function syncOverlayState() {
   const shown =
     document.getElementById("toast").classList.contains("is-visible") ||
+    document.getElementById("confirm").classList.contains("is-visible") ||
     document.getElementById("reading-overlay").classList.contains("is-visible");
   document.body.classList.toggle("is-overlay", shown);
 }
@@ -170,6 +189,10 @@ function showToast(event) {
   toast.classList.remove("is-out", "is-error");
   clearTimeout(showToast._t);
   hideNotePrompt();
+  // Something happened - a card tap, or this page's own click-to-toggle.
+  // Either way a half-answered confirmation dialog is now about the wrong
+  // moment, so it goes rather than reappearing under the toast.
+  closeConfirm();
 
   const hint = document.getElementById("toast-hint");
 
@@ -188,6 +211,12 @@ function showToast(event) {
   document.getElementById("toast-action").textContent =
     event.action === "in" ? "Checked in" : "Checked out";
   document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
+  // "You may remove your card now" is the wrong thing to say to someone who
+  // just clicked their own name, and the mark it leaves on the board is worth
+  // stating at the moment it is made rather than only afterwards.
+  hint.textContent = event.manual
+    ? "No card used — recorded as a manual entry"
+    : "You may remove your card now";
   hint.style.display = "block";
   setToastVisible(true);
 
@@ -256,6 +285,152 @@ function showToast(event) {
   }
 }
 
+// --- click to check in/out -------------------------------------------
+// The no-card path: click your name on the roster strip, confirm, done. It
+// exists for a reader that's down, a card left at home, and the stretch
+// before the reader is even installed - so it has to work with a mouse and
+// nothing else, hence a two-button dialog rather than anything typed.
+//
+// It asks first on purpose. The strip is six large targets along the bottom
+// of a screen that sits in the open all day; without a confirmation step a
+// single stray click silently checks somebody in or out, and the only trace
+// is a line in an append-only log. Every event this writes is flagged
+// manual server-side, and the board says "No card" beside that person's
+// name until their next tap - an unverified entry should never be
+// indistinguishable from a card read.
+
+const CONFIRM_TIMEOUT_MS = 20000;   // an abandoned dialog must not sit on the board
+
+const confirmEl = document.getElementById("confirm");
+const confirmNameEl = document.getElementById("confirm-name");
+const confirmActionEl = document.getElementById("confirm-action");
+const confirmOkBtn = document.getElementById("confirm-ok");
+const confirmCancelBtn = document.getElementById("confirm-cancel");
+
+// Which member the open dialog is about; null when it's closed, which is
+// also what makes a second Confirm click (or a timeout landing on an
+// already-submitted dialog) a no-op.
+let confirmMemberId = null;
+
+function closeConfirm() {
+  clearTimeout(closeConfirm._t);
+  if (confirmMemberId === null) return;
+  confirmMemberId = null;
+  confirmEl.classList.remove("is-visible");
+  document.body.classList.remove("is-confirm");
+  syncOverlayState();
+}
+
+// Name and current status come off the card that was clicked rather than a
+// copy of the roster kept on the side: the strip is already the rendering of
+// exactly that data, and re-reading it can't drift out of sync with what the
+// person is looking at.
+function openConfirm(card) {
+  const memberId = Number(card.dataset.memberId);
+  if (!memberId) return;
+  const goingIn = !card.classList.contains("is-in");
+
+  confirmMemberId = memberId;
+  confirmNameEl.textContent = card.querySelector(".roster__name").textContent;
+  confirmActionEl.textContent = goingIn ? "Check in?" : "Check out?";
+  confirmOkBtn.textContent = goingIn ? "Check in" : "Check out";
+  confirmEl.classList.toggle("is-out", !goingIn);
+  confirmEl.classList.add("is-visible");
+  document.body.classList.add("is-confirm");
+  syncOverlayState();
+
+  // Cancel takes focus, not Confirm: if a keyboard is ever plugged in, a
+  // stray Enter should land on the harmless button.
+  confirmCancelBtn.focus();
+  closeConfirm._t = setTimeout(closeConfirm, CONFIRM_TIMEOUT_MS);
+}
+
+async function submitConfirm() {
+  const memberId = confirmMemberId;
+  if (memberId === null) return;
+  closeConfirm();       // also clears the id, so a double click can't post twice
+
+  try {
+    const res = await fetch("/api/manual-toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ member_id: memberId }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (e) {
+    report("manual-toggle-failed", e);
+    showToast({
+      action: "error",
+      message: "Could not record that",
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  // The toast is left to the poll rather than raised from the response here,
+  // so events reach the screen through exactly one path however they were
+  // caused. Polling immediately instead of waiting out POLL_MS is what keeps
+  // it feeling instant; the sequence guard in poll() handles the overlap.
+  poll();
+}
+
+// Delegated, because renderRoster() replaces the whole strip whenever the
+// data changes and per-card handlers would go with it.
+document.getElementById("roster").addEventListener("click", (e) => {
+  const card = e.target.closest(".roster__card");
+  if (card) openConfirm(card);
+});
+
+confirmOkBtn.onclick = submitConfirm;
+confirmCancelBtn.onclick = closeConfirm;
+
+// Clicking the backdrop is a cancel: the dialog covers the screen, so
+// "somewhere else" is the instinctive way out of one opened by mistake.
+confirmEl.addEventListener("click", (e) => {
+  if (e.target === confirmEl) closeConfirm();
+});
+
+// Keyboard is a courtesy here (the kiosk has no keyboard), and matches the
+// note prompt's arrow-key handling. Enter on a focused button is native.
+confirmEl.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); closeConfirm(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); confirmCancelBtn.focus(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); confirmOkBtn.focus(); }
+});
+
+// --- pointer visibility ----------------------------------------------
+// The board hides the cursor (cursor: none on body.kiosk) - a pointer parked
+// in the middle of an unattended display for a week is exactly the sort of
+// thing nobody comes back to move. But the roster strip is clickable now, so
+// it has to come back the moment the mouse moves and go away again once it
+// stops.
+//
+// Cheap by construction: one class check per mousemove and no timer churn
+// (the pending timeout re-reads the timestamp and pushes itself out rather
+// than being cleared and reset thousands of times), and `cursor` is not a
+// rendered property, so neither state costs a paint.
+
+const POINTER_IDLE_MS = 8000;
+let lastPointerMove = 0;
+
+function hidePointerWhenIdle() {
+  const remaining = POINTER_IDLE_MS - (Date.now() - lastPointerMove);
+  if (remaining > 0) {
+    hidePointerWhenIdle._t = setTimeout(hidePointerWhenIdle, remaining);
+    return;
+  }
+  document.body.classList.remove("has-pointer");
+}
+
+document.addEventListener("mousemove", () => {
+  lastPointerMove = Date.now();
+  // Already showing: the pending timeout will see the fresh timestamp when it
+  // fires and reschedule itself, so there is nothing to do per event.
+  if (document.body.classList.contains("has-pointer")) return;
+  document.body.classList.add("has-pointer");
+  hidePointerWhenIdle._t = setTimeout(hidePointerWhenIdle, POINTER_IDLE_MS);
+}, { passive: true });
+
 // --- card reader presence --------------------------------------------
 // The board is unattended: an unplugged reader, or a pcscd that died, looks
 // exactly like a quiet day unless the board says so. The server samples it
@@ -289,7 +464,16 @@ function setReading(active) {
   syncOverlayState();
 }
 
+// Polls can overlap: submitConfirm() fires one the instant a click has been
+// recorded instead of waiting out the interval, so two are briefly in flight.
+// If the older reply lands second it carries the pre-click state - repainting
+// a stale roster, and re-toasting the event before it, since its id differs
+// from the one just shown. Sequence numbers make the loser a no-op.
+let pollSeq = 0;
+let latestPollApplied = 0;
+
 async function poll() {
+  const seq = ++pollSeq;
   try {
     // ?src=kiosk lets the server tell this page's polls apart from the
     // dashboard's, so the health heartbeat can report a kiosk that has
@@ -297,6 +481,8 @@ async function poll() {
     // at all from the server side otherwise).
     const res = await fetch("/api/state?src=kiosk");
     const data = await res.json();
+    if (seq < latestPollApplied) return;
+    latestPollApplied = seq;
     renderRoster(data.roster);
     renderReader(data.reader);
     setReading(!!data.reading);

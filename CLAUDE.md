@@ -35,7 +35,11 @@ curl -X POST http://localhost:5000/api/manual-toggle \
 ```
 
 Each call toggles that member in/out, so run it twice to exercise both the
-check-in toast and the checkout note prompt.
+check-in toast and the checkout note prompt. Clicking a name on the kiosk
+page does the same thing through the UI (see "Checking in without a card"
+below). Either way the event is flagged `manual` and carries a "No card"
+mark on the board - that is production behaviour, not a dev shortcut, so
+neither is a byte-for-byte stand-in for a tap.
 
 Then open `http://localhost:5000` (kiosk display) and
 `http://localhost:5000/dashboard` in a browser. There is no test suite or
@@ -44,6 +48,61 @@ the routes/UI directly.
 
 `scripts/setup.sh` is the Pi deployment installer only (installs
 `pcscd`/`opensc`, kiosk Chromium, systemd services) — never run it in dev.
+
+### Checking in without a card
+
+Clicking a name on the roster strip checks that person in or out without a
+CAC. It exists for a dead reader, a card left at home, and the stretch
+before the reader is installed at all, so it has to work with a mouse and
+nothing else - hence a two-button confirmation dialog (`.confirm`,
+`openConfirm()`/`submitConfirm()` in `main.js`) rather than anything typed.
+It posts to the same `/api/manual-toggle` the dev loop and the network
+fallback use.
+
+- **Every event it writes is flagged `manual`, and the board says so.** The
+  kiosk prints an amber `NO CARD` under that person's name until their next
+  tap, and the dashboard shows it in the roster and the activity log's Note
+  column. This is the point of the feature's design, not decoration: a CAC
+  tap means something precisely because a card was read, and an entry
+  anybody could have clicked must not be indistinguishable from one. The
+  flag lives on the event row rather than being derived later, because
+  nothing else in the row distinguishes the two.
+- **The mark shares the roster card's note line rather than adding one.**
+  `.kiosk .roster__card` has a `min-height` pinned to a three-line card
+  (name + status + note), so a fourth line would start the whole bottom bar
+  wobbling again - see the comment on that rule. A manual checkout can
+  carry a typed note too, so both go on one line as `NO CARD · at lunch`
+  (`rosterNote()` in `main.js`, `noteText()`/`noteLine()` in
+  `dashboard.js`).
+- **It always confirms first.** The strip is six large targets along the
+  bottom of a screen standing in the open all day; without the dialog one
+  stray click silently logs somebody in or out and the only trace is a line
+  in an append-only log. The dialog cancels on a backdrop click, on
+  Escape, and on a 20s timeout, so an abandoned one can't sit on the board.
+  A card tap arriving mid-dialog supersedes it - `showToast()` calls
+  `closeConfirm()`.
+- **The pointer is hidden by default and revealed by movement.**
+  `body.kiosk` is `cursor: none`; a `mousemove` listener adds `has-pointer`
+  and drops it again after `POINTER_IDLE_MS` (8s), so the strip is
+  clickable without leaving a cursor parked on an unattended board for a
+  week. `is-note-prompt` and `is-confirm` force it visible regardless,
+  because both put controls on screen and then wait. The listener does one
+  class check per event and the pending timeout reschedules itself rather
+  than being cleared and reset thousands of times; `cursor` is not a
+  rendered property, so neither state costs a paint.
+- **Roster cards are `<button>`s on the kiosk and plain `<div>`s on the
+  dashboard.** Only the kiosk's are controls. The four UA-reset properties
+  on `.roster__card` (`appearance`, `border`, `font`, `text-align`) are what
+  keep the two rendering identically; without them the kiosk strip picks up
+  a native border and centred system text. The click handler is delegated
+  to `#roster`, since `renderRoster()` replaces the strip wholesale.
+- **`poll()` numbers its own requests and drops out-of-order replies.**
+  `submitConfirm()` fires a poll the instant the POST returns instead of
+  waiting out `POLL_MS`, so two are briefly in flight; the older reply
+  carries pre-click state and would repaint a stale roster and re-toast the
+  event before it. That is also why the toast is left to the poll rather
+  than raised from the POST response - events reach the screen through
+  exactly one path however they were caused.
 
 ### Kiosk slide rotation
 
@@ -121,22 +180,25 @@ changing the video:
 
 ### Overlays over the background video
 
-The toast and the "reading card" overlay are full-screen `position: fixed`
-layers. When a background video is configured they go translucent so it
-stays visible through the whole tap flow; with no video they stay fully
-opaque, which lets the compositor skip painting the board underneath
-entirely. That's why every rule is gated on `body.has-bg` rather than
-applied unconditionally — see Performance below.
+The toast, the "reading card" overlay and the click-to-toggle confirmation
+dialog are full-screen `position: fixed` layers. When a background video is
+configured they go translucent so it stays visible through the whole tap
+flow; with no video they stay fully opaque, which lets the compositor skip
+painting the board underneath entirely. That's why every rule is gated on
+`body.has-bg` rather than applied unconditionally — see Performance below.
 
-Three pieces have to move together, and missing any one of them looks
-broken rather than subtly wrong:
+Three pieces of that treatment have to move together, and missing any one
+of them looks broken rather than subtly wrong:
 
 - **`body.is-overlay`** is toggled by `syncOverlayState()`, which *derives*
-  the flag from whether either overlay currently has `is-visible`. It is
-  deliberately not two independent togglers: the two overlays overlap when
-  a tap completes and the toast replaces the reading overlay, and
-  independent toggles race there. Any new code path that shows or hides the
-  toast must go through `setToastVisible()`, not `classList` directly.
+  the flag from whether any of the three currently has `is-visible`. It is
+  deliberately not one toggler per overlay: they overlap when a tap
+  completes and the toast replaces the reading overlay (or the confirmation
+  dialog), and independent toggles race there. Any new code path that shows
+  or hides one must go through `setToastVisible()` / `closeConfirm()` and
+  then `syncOverlayState()`, not `classList` directly. They stack
+  reading (55) → confirm (58) → toast (60): a card presented while a dialog
+  is open is the more important thing to say, and the toast supersedes both.
 - **`.media__scrim` is hidden while an overlay is up.** Stacking the
   panel's 0.72 scrim under the overlay's 0.72 scrim leaves only ~8% of the
   video coming through — visibly black, and the reason the effect looks
@@ -254,7 +316,9 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   thread-shared state guarded by `_state_lock`: `_last_event` (so the kiosk
   can poll `/api/state` and detect a new event by comparing `event_id`) and
   `_reader_status["reading"]` (so the kiosk can show "reading card..."
-  between physical tap and PKCS#11 read completing). It also holds
+  between physical tap and PKCS#11 read completing). `_push_event()` also
+  returns a snapshot of what it published, which is what `/api/manual-toggle`
+  reports back to its caller. It also holds
   `_kiosk_status["last_poll"]`, stamped only by requests carrying
   `?src=kiosk`, so the health heartbeat can tell a dead kiosk browser from a
   live one — the dashboard polls the same endpoint from other PCs and must
@@ -269,6 +333,12 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   multiple CAC monitors fighting over the reader and per-worker copies of
   `_last_event`, so the kiosk would miss toasts depending on which worker
   answered the poll. Keep it single-worker.
+- **`/api/manual-toggle`** — toggles a member without a card, for the kiosk's
+  click-a-name flow, the network fallback when the reader is down, and dev
+  machines with no reader at all. Everything it writes is flagged `manual`,
+  because none of it saw a card. An unknown `member_id` is a 400, not a 500:
+  a kiosk page left open across a roster change is holding stale ids, which
+  is not a server fault.
 - **`cac_reader.py`** — background thread (pyscard's `CardMonitor`) that
   watches the physical reader and identifies the card via PKCS#11, without
   requiring a PIN (reading the PIV Authentication cert, a public object, is
@@ -365,7 +435,11 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   the whole board until someone notices and restarts) and
   `events` (append-only check-in/out log; `action` is `'in'`/`'out'`,
   current status for a member = the most recent event, `note` is the
-  optional checkout comment). `get_weekly_hours()` computes hours by pairing
+  optional checkout comment, `manual` is 1 when no card was read - see
+  "Checking in without a card" above. `get_roster_status()` surfaces
+  `manual` for whichever event set the member's current status, in both
+  directions, unlike `note`; an unverified check-*in* is the half worth
+  flagging). `get_weekly_hours()` computes hours by pairing
   consecutive in/out events over the last 7 days, counting an unmatched
   trailing `in` up to now.
   - Backfilling attendance by hand is `scripts/add-event.py` (name, `in`/`out`,
@@ -380,7 +454,8 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `CREATE TABLE IF NOT EXISTS` is a no-op on existing installs, so adding
     a column means a `_migrate_*` helper that checks
     `PRAGMA table_info` and `ALTER TABLE`s if missing — see
-    `_migrate_add_note_column()` for the pattern, and
+    `_migrate_add_note_column()` and `_migrate_add_manual_column()` for the
+    pattern, and
     `_migrate_hash_edipi_column()` for one that rewrites data as well as
     shape (it renames `edipi` → `edipi_hash` and rehashes in place — in
     place specifically so `members.id`, and therefore every `events` row
@@ -434,6 +509,26 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   pick up changes). An entry carrying a plaintext `edipi` instead is still
   accepted and hashed on the fly, with a WARNING naming the person — a
   half-finished hand-edit shouldn't silently drop somebody off the board.
+  - **A member with no EDIPI yet is a real member row carrying a placeholder
+    hash.** `identity.pending_hash(name)` returns `pending-<slug>`, written by
+    `add-member.py --pending` and also produced by `_entry_hash()` for an
+    entry hand-added with neither field — that path runs from `init_db()` at
+    import time, so raising there would take the whole board down over a typo.
+    A pending member shows on the kiosk and dashboard and checks in through
+    the click-a-name flow like anyone else; no card can ever select the row,
+    because a real hash is 32 hex characters and the placeholder isn't one.
+    `add-member.py --replace` fills the EDIPI in later and rewrites
+    `members.edipi_hash` **in place**, for the same reason
+    `_migrate_hash_edipi_column()` does: `sync_members_from_config()` upserts
+    on `edipi_hash`, so editing the roster file alone reads as one member
+    leaving and another joining, and leaves the deactivated pending row
+    holding every event logged against it. It updates the DB *before* the
+    JSON, so a refusal leaves the roster unconverted rather than
+    half-converted, and prints the equivalent `UPDATE` to run by hand when
+    there's no local DB — the usual case, since hashes are made wherever
+    `roster.key` lives and that isn't the Pi. Placeholders are excluded from
+    `_warn_if_roster_key_lost()`'s counts: no key made them, so they say
+    nothing about whether the current one is right.
 - **`config/objectives.json`** — kiosk screensaver text. Each objective
   becomes one full-panel slide in the media rotation (see below). Re-read by
   the frontend every 60s with no restart needed (`/api/objectives`); a change

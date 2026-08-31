@@ -53,7 +53,8 @@ def init_db():
             member_id INTEGER NOT NULL REFERENCES members(id),
             action TEXT NOT NULL CHECK(action IN ('in', 'out')),
             timestamp TEXT NOT NULL,
-            note TEXT
+            note TEXT,
+            manual INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_member_time
@@ -62,6 +63,7 @@ def init_db():
     )
     conn.commit()
     _migrate_add_note_column()
+    _migrate_add_manual_column()
     _migrate_hash_edipi_column()
     _warn_if_roster_key_lost()
     sync_members_from_config()
@@ -77,6 +79,21 @@ def _migrate_add_note_column():
     cols = [row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()]
     if "note" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN note TEXT")
+        conn.commit()
+
+
+def _migrate_add_manual_column():
+    """
+    Same pattern as the note column above: installs predating the kiosk's
+    click-to-toggle path have no `manual` flag, and CREATE TABLE IF NOT
+    EXISTS won't add one. Existing rows default to 0 - every event written
+    before this column existed came from a card tap, which is what 0 means.
+    Safe to run every startup.
+    """
+    conn = get_conn()
+    cols = [row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()]
+    if "manual" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
 
@@ -130,6 +147,11 @@ def _warn_if_roster_key_lost():
 
     Two shapes of the same mistake, because a fresh clone has no rows yet:
     hashes already in the database, and hashes already in members.json.
+
+    Pending placeholders are excluded from both counts. They were not made by
+    any key, so they say nothing about whether this one is the right one, and
+    counting them would raise this alarm over a roster that has simply not been
+    given its EDIPIs yet.
     """
     identity.load_key()
     if not identity.key_was_generated:
@@ -139,6 +161,7 @@ def _warn_if_roster_key_lost():
     hashed = [
         r for r in conn.execute("SELECT edipi_hash FROM members")
         if not _PLAINTEXT_EDIPI.match(r["edipi_hash"])
+        and not identity.is_pending(r["edipi_hash"])
     ]
     if hashed:
         log.error(
@@ -161,7 +184,10 @@ def _warn_if_roster_key_lost():
         entries = json.loads(MEMBERS_CONFIG.read_text()).get("members", [])
     except (OSError, ValueError):
         return  # a missing or unparseable roster is sync's problem, not this one
-    prehashed = [m for m in entries if m.get("edipi_hash")]
+    prehashed = [
+        m for m in entries
+        if m.get("edipi_hash") and not identity.is_pending(m["edipi_hash"])
+    ]
     if prehashed:
         log.error(
             "%s lists %d member(s) already hashed, but the roster key at %s was "
@@ -178,13 +204,31 @@ def _warn_if_roster_key_lost():
 
 def _entry_hash(entry: dict, name: str) -> str:
     """
-    A roster entry identifies someone by edipi_hash. A plaintext `edipi` is
-    still accepted and hashed on the fly - a hand-edit shouldn't silently drop
-    someone off the board - but it means the number is sitting in the config
-    file, so say so on every startup until it gets converted.
+    A roster entry identifies someone by edipi_hash. Two hand-edited shapes
+    are accepted as well, both with a WARNING naming the person, because a
+    half-finished edit shouldn't silently drop somebody off the board and it
+    certainly shouldn't stop the app from starting - this runs from init_db()
+    at import time, so anything raised here takes the whole board down.
+
+    A plaintext `edipi` is hashed on the fly, but it means the number is
+    sitting in the config file, so say so until it gets converted. An entry
+    with neither field is someone whose EDIPI hasn't arrived yet, and becomes
+    a pending placeholder - see identity.pending_hash() and
+    scripts/add-member.py --pending, which is the deliberate way to do this.
     """
     if entry.get("edipi_hash"):
         return str(entry["edipi_hash"]).strip()
+    if not entry.get("edipi"):
+        log.warning(
+            "%s lists %s with no edipi_hash, so they are on the board as a "
+            "pending member: they can be checked in by clicking their name, "
+            "but no card will match them. Finish the entry with "
+            "scripts/add-member.py --replace \"%s\" once you have their EDIPI.",
+            MEMBERS_CONFIG,
+            name,
+            name,
+        )
+        return identity.pending_hash(name)
     log.warning(
         "%s lists a plaintext EDIPI for %s. It works, but the number is stored "
         "in the clear - run scripts/add-member.py to replace that entry with an "
@@ -301,12 +345,17 @@ def current_status(member_id: int) -> str:
     return row["action"] if row else "out"
 
 
-def toggle_checkin(member_id: int) -> dict:
+def toggle_checkin(member_id: int, manual: bool = False) -> dict:
     """
     Flips a member's status (in <-> out) and logs the event.
     Returns the event dict: {member_id, display_name, action, timestamp,
-    checkin_event_id}. checkin_event_id is the events table row id, used to
-    attach an optional note afterward via set_event_note().
+    checkin_event_id, manual}. checkin_event_id is the events table row id,
+    used to attach an optional note afterward via set_event_note().
+
+    manual=True records that no card was involved - the kiosk's click-a-name
+    path and /api/manual-toggle. It is stored per event rather than derived
+    later because nothing else in the row distinguishes the two, and the
+    board says so beside the person's name (see get_roster_status).
     """
     conn = get_conn()
     member = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
@@ -317,8 +366,8 @@ def toggle_checkin(member_id: int) -> dict:
     now = datetime.now().isoformat(timespec="seconds")
 
     cursor = conn.execute(
-        "INSERT INTO events (member_id, action, timestamp) VALUES (?, ?, ?)",
-        (member_id, new_action, now),
+        "INSERT INTO events (member_id, action, timestamp, manual) VALUES (?, ?, ?, ?)",
+        (member_id, new_action, now, 1 if manual else 0),
     )
     conn.commit()
 
@@ -328,6 +377,7 @@ def toggle_checkin(member_id: int) -> dict:
         "action": new_action,
         "timestamp": now,
         "checkin_event_id": cursor.lastrowid,
+        "manual": bool(manual),
     }
 
 
@@ -367,6 +417,11 @@ def get_roster_status():
                     # Only surface the note while they're actually out - it's tied
                     # to that specific checkout, not a persistent profile field.
                     "note": last["note"] if (last and status == "out") else None,
+                    # Whether the event that put them in this state was a click
+                    # rather than a tap. Unlike the note, this applies to both
+                    # directions: an unverified check-*in* is the half worth
+                    # flagging, since nobody's card was ever present for it.
+                    "manual": bool(last["manual"]) if last else False,
                 },
             )
         )

@@ -55,7 +55,12 @@ def _set_reading(active: bool):
         _reader_status["reading"] = active
 
 
-def _push_event(display_name, action, message=None, checkin_event_id=None):
+def _push_event(display_name, action, message=None, checkin_event_id=None, manual=False):
+    """
+    Publishes an event for the kiosk to pick up on its next /api/state poll.
+    Returns a snapshot of what it published, which is what /api/manual-toggle
+    reports back to its caller.
+    """
     with _state_lock:
         _last_event["id"] += 1
         _last_event["event_id"] = _last_event["id"]
@@ -70,6 +75,10 @@ def _push_event(display_name, action, message=None, checkin_event_id=None):
             _last_event["checkin_event_id"] = checkin_event_id
         else:
             _last_event.pop("checkin_event_id", None)
+        # Whether this happened without a card. The toast says so instead of
+        # "you may remove your card now", which would be nonsense for a click.
+        _last_event["manual"] = bool(manual)
+        return dict(_last_event)
 
 
 def _handle_card_detected():
@@ -176,17 +185,41 @@ def api_weekly_hours():
 @app.route("/api/manual-toggle", methods=["POST"])
 def api_manual_toggle():
     """
-    Admin/testing fallback: toggle a member's status without a card tap.
-    Useful while you're bringing up the CAC reader, or if the reader is
-    ever down and someone needs to be logged manually. Not exposed in the
-    kiosk UI - reach it directly if needed, e.g. from the dashboard.
+    Toggle a member's status without a card tap. Three callers: the kiosk's
+    click-a-name flow (tapping the roster card, then confirming), the
+    dashboard/curl fallback for when the reader is down, and dev machines
+    with no reader at all.
+
+    Every event written here is flagged manual, because none of them saw a
+    card - the board and the log say so beside the person's name so an
+    unverified check-in is never mistaken for a tap.
+
+    The response is the event exactly as /api/state would report it, id
+    included. The kiosk still re-polls rather than toasting from this reply
+    (one path to the screen for every event, whatever caused it - see
+    submitConfirm() in main.js); it's here for curl and for anything that
+    wants to know what the toggle actually did.
     """
-    member_id = request.json.get("member_id")
+    member_id = (request.json or {}).get("member_id")
     if member_id is None:
         return jsonify({"error": "member_id required"}), 400
-    event = db.toggle_checkin(int(member_id))
-    _push_event(event["display_name"], event["action"], checkin_event_id=event["checkin_event_id"])
-    return jsonify(event)
+    try:
+        event = db.toggle_checkin(int(member_id), manual=True)
+    except (TypeError, ValueError):
+        # An unknown or non-numeric member_id: a stale kiosk page holding ids
+        # from before a roster change, not a server fault, so don't 500 it.
+        return jsonify({"error": "unknown member_id"}), 400
+    log.info(
+        "%s checked %s at %s (no card)",
+        event["display_name"], event["action"], event["timestamp"],
+    )
+    pushed = _push_event(
+        event["display_name"],
+        event["action"],
+        checkin_event_id=event["checkin_event_id"],
+        manual=True,
+    )
+    return jsonify(pushed)
 
 
 # --- diagnostics ------------------------------------------------------

@@ -27,6 +27,24 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// "No card" is the mark left by the kiosk's click-to-toggle path (and by
+// /api/manual-toggle generally): the person was recorded without a card
+// being read. Same wording and colour as the kiosk board, since it means the
+// same thing in both places.
+const NO_CARD = '<span class="roster__nocard">No card</span>';
+
+function noteText(manual, note) {
+  const parts = [];
+  if (manual) parts.push(NO_CARD);
+  if (note) parts.push(escapeHtml(note));
+  return parts.join(" · ");
+}
+
+function noteLine(manual, note) {
+  const text = noteText(manual, note);
+  return text ? `<div class="roster__note">${text}</div>` : "";
+}
+
 function renderRoster(roster) {
   if (skipIfUnchanged("roster", roster)) return;
   const el = document.getElementById("dash-roster");
@@ -36,7 +54,7 @@ function renderRoster(roster) {
       <div class="roster__meta">
         <div class="roster__name">${escapeHtml(m.display_name)}</div>
         <div class="roster__status">${m.status === 'in' ? 'In lab' : 'Out'}${m.since ? ' · since ' + fmtDateTime(m.since) : ''}</div>
-        ${m.note ? `<div class="roster__note">${escapeHtml(m.note)}</div>` : ''}
+        ${noteLine(m.manual, m.note)}
       </div>
     </div>
   `).join("");
@@ -59,7 +77,7 @@ function renderEvents(events) {
       <td>${fmtDateTime(e.timestamp)}</td>
       <td>${escapeHtml(e.display_name)}</td>
       <td class="action-${e.action}">${e.action === 'in' ? 'Checked in' : 'Checked out'}</td>
-      <td>${e.note ? escapeHtml(e.note) : '—'}</td>
+      <td>${noteText(e.manual, e.note) || '—'}</td>
     </tr>
   `).join("");
 }

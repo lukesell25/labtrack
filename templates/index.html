@@ -55,10 +55,26 @@
     <div class="reading-overlay__text">Reading card&hellip;</div>
   </div>
 
+  <!-- Click-to-toggle confirmation. A member can check themselves in or out
+       without a card by clicking their name on the roster strip; this
+       asks first, because the strip sits under the mouse pointer all day and
+       a stray click must not silently log somebody in or out. -->
+  <div class="confirm" id="confirm">
+    <div class="confirm__name" id="confirm-name"></div>
+    <div class="confirm__action" id="confirm-action"></div>
+    <div class="confirm__hint">No card will be read &mdash; the board will show this as a manual entry.</div>
+    <div class="confirm__actions">
+      <button type="button" id="confirm-cancel" class="confirm__btn">Cancel</button>
+      <button type="button" id="confirm-ok" class="confirm__btn confirm__btn--go">Confirm</button>
+    </div>
+  </div>
+
   <div class="toast" id="toast">
     <div class="toast__name" id="toast-name"></div>
     <div class="toast__action" id="toast-action"></div>
     <div class="toast__time" id="toast-time"></div>
+    <!-- Text set by main.js: removing your card is the wrong instruction when
+         nobody used one. -->
     <div class="toast__hint" id="toast-hint">You may remove your card now</div>
     <div class="toast__note" id="toast-note">
       <input type="text" id="note-input" class="toast__note-input"

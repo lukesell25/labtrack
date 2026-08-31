@@ -17,6 +17,7 @@ thread) inside the 1-3s the PKCS#11 read already takes.
 
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 from hashlib import scrypt
@@ -33,6 +34,28 @@ SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_MAXMEM = 2**26
 HASH_BYTES = 16
+
+# A member who is on the roster but has no EDIPI yet - new to the lab, still
+# waiting on their card, or here before the reader is. `edipi_hash` is only
+# ever a lookup key, so a placeholder in that column costs nothing: the person
+# shows on the board and can be checked in by clicking their name, and no card
+# can ever select their row, because a real hash is 32 hex characters and this
+# deliberately isn't one. Giving them a real member row from day one is what
+# lets their history survive the later swap - see scripts/add-member.py
+# --replace, which rewrites this value in place rather than adding a row.
+PENDING_PREFIX = "pending-"
+
+
+def pending_hash(display_name: str) -> str:
+    """The placeholder edipi_hash for a member whose EDIPI isn't known yet."""
+    slug = re.sub(r"[^a-z0-9]+", "-", display_name.strip().lower()).strip("-")
+    return PENDING_PREFIX + (slug or "member")
+
+
+def is_pending(edipi_hash: str) -> bool:
+    """True for a placeholder from pending_hash(), never for a real hash."""
+    return str(edipi_hash).startswith(PENDING_PREFIX)
+
 
 _key = None
 

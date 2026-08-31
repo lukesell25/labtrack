@@ -28,15 +28,22 @@ python3 app.py
 
 This runs the full app minus actual CAC hardware support -
 `cac_reader.py` detects that `pyscard` isn't installed and logs a single
-warning instead of crashing, so every route still works. Simulate a card
-tap from another terminal (or curl/Postman) instead of tapping a real
-card:
+warning instead of crashing, so every route still works. Click a name on
+the kiosk page to check that person in or out (see "Checking in without a
+card" below), or drive the same thing from another terminal (or
+curl/Postman):
 
 ```bash
 curl -X POST http://localhost:5000/api/manual-toggle \
      -H "Content-Type: application/json" \
      -d '{"member_id": 1}'
 ```
+
+Each call toggles that member, so run it twice to exercise both the
+check-in toast and the checkout note prompt. Note that events written this
+way are flagged as manual and show a "No card" mark on the board - that is
+the real behaviour, not a dev-mode artifact, so it is not a pixel-perfect
+stand-in for a tap.
 
 Then open `http://localhost:5000` (kiosk display) and
 `http://localhost:5000/dashboard` in a browser to see your changes.
@@ -65,6 +72,7 @@ labtrack/
   identity.py               One-way hashing of EDIPIs for the roster
   scripts/setup.sh          Installs everything below in one go
   scripts/add-member.py     Adds a member without their EDIPI hitting disk
+                            (--pending for one you don't have an EDIPI for yet)
   scripts/add-event.py      Logs a check-in/out at a time you name
   scripts/soak-report.sh    Summarises a long unattended run
 ```
@@ -163,6 +171,67 @@ Note the roster is keyed on the **hashed EDIPI**, not on name or position in
 the file — so reordering the list or fixing a spelling is safe, but re-adding
 someone with a different EDIPI reads as "one person left, a different one
 joined".
+
+**Someone whose EDIPI you don't have yet.** A new member, a card that hasn't
+been issued, or the stretch before the reader is installed at all - put them
+on the board now and fill the number in later:
+
+```bash
+python3 scripts/add-member.py --pending "Ada Vance"
+```
+
+That asks for nothing and writes a placeholder where the hash goes
+(`pending-ada-vance`). After a restart Ada is a full member: she appears on
+the kiosk strip and the dashboard, she can be checked in and out by clicking
+her name (see "Checking in without a card" below), and those events are
+flagged `manual` and marked `NO CARD` exactly like anyone else's click-in. No
+card can ever match her, because a real hash is 32 hex characters and the
+placeholder deliberately isn't one.
+
+Adding the name by hand with no `edipi_hash` field at all does the same thing
+rather than failing - the roster sync runs at startup, so a half-finished edit
+that raised would take the whole board down. Every restart names the person
+until it's finished:
+
+```
+WARNING labtrack.db: config/members.json lists Ada Vance with no edipi_hash, so they are on the board as a pending member ...
+```
+
+**Filling in a pending member's EDIPI.** When the number turns up:
+
+```bash
+python3 scripts/add-member.py --replace "Ada Vance"
+```
+
+It prompts for the EDIPI the same way (twice, not echoed), replaces the
+placeholder in `config/members.json`, and - the part that matters - rewrites
+that same row in `labtrack.db` instead of adding a second one.
+
+**Don't do this swap by editing the file alone.** The roster is keyed on the
+hashed EDIPI, so changing the hash reads as *one person leaving and a
+different one joining*: the restart adds a new row and deactivates the old
+one, which still owns every check-in Ada logged while she was pending. Those
+vanish from the board and from "Hours this week", and if she was checked in at
+the time, that `in` is left with no `out` after it and counts as time in the
+lab up to now.
+
+```
+id 1  pending-ada-vance   Ada Vance  active 0   <- owns her events
+id 2  aaaabbbb...         Ada Vance  active 1   <- fresh, empty
+```
+
+**When the key and the database are on different machines.** The hash has to
+be made where `config/roster.key` lives, which often isn't the Pi holding
+`labtrack.db`. `--replace` says so and prints the one command that finishes
+the job, to be run on the Pi *before* restarting - the restart is what would
+create that second row:
+
+```bash
+sqlite3 labtrack.db "UPDATE members SET edipi_hash = '<the new hash>' WHERE edipi_hash = 'pending-ada-vance';"
+```
+
+Copy the updated `config/members.json` across as well, then restart. Ada's
+next tap is recognised and the `NO CARD` mark clears with it.
 
 A hand-edited entry with a plaintext `"edipi": "1234567890"` still works, so a
 half-finished edit can't silently drop somebody off the board, but it defeats
@@ -474,6 +543,43 @@ machine on the same network:
 http://<pi-ip-address>:5000/dashboard
 ```
 
+## Checking in without a card
+
+Tapping a CAC is the normal path. When that isn't possible - the reader is
+down, someone left their card at home, or the reader hasn't been installed
+yet - a member can check themselves in or out from the kiosk itself:
+
+1. Move the mouse. The kiosk hides the pointer after 8 seconds of stillness
+   (an always-on board shouldn't have a cursor parked on it for a week), so
+   it reappears as soon as the mouse does.
+2. Click your name in the roster strip along the bottom of the screen.
+3. The board asks "Check in?" / "Check out?" - click Confirm. The dialog
+   cancels itself after 20 seconds, and clicking anywhere outside the two
+   buttons cancels it too, so a stray click never logs anything by itself.
+
+From there it behaves exactly like a tap: the same confirmation, and the
+same optional "why are you out" note prompt on a checkout.
+
+**Anything logged this way is marked.** The event carries a `manual` flag in
+the database, the kiosk shows an amber `NO CARD` under that person's name
+until their next tap, and the dashboard shows it in both the roster and the
+Note column of the activity log. Nothing verified a card, so nothing
+pretends one was read - the whole point of tapping a CAC is that the entry
+means something, and an entry anybody could have clicked has to be legible
+as such.
+
+For a **pending member** - someone on the roster with no EDIPI yet, added
+with `add-member.py --pending` (see "3. Fill in your roster") - this isn't a
+fallback, it's the only way in until their number arrives. Every event they
+log stays marked `NO CARD`; the mark clears on their first real tap once the
+EDIPI is filled in with `--replace`.
+
+A mouse has to be plugged into the Pi for any of this, which is also the
+thing that makes it a fallback rather than the front door: no mouse, no
+click-in. The `/api/manual-toggle` endpoint underneath it is the same one
+described under "Day-to-day maintenance" below, so a member can also be
+toggled from another machine on the network.
+
 ## Watching a long run
 
 The board is meant to sit powered on for weeks, and the failure modes that
@@ -645,14 +751,29 @@ accruing. That's unchanged by this timer; it's the same as any other restart.
 - **Check on a long run:** `scripts/soak-report.sh` (see "Watching a long
   run" above), or `curl -s http://localhost:5000/api/health` for one sample
 - **Manually toggle someone in/out** (if the reader is down, or for testing)
-  without touching the card reader:
+  without touching the card reader. From the kiosk itself this is a click on
+  the person's name - see "Checking in without a card" above - and over the
+  network it's the same endpoint that click posts to:
   ```bash
   curl -X POST http://localhost:5000/api/manual-toggle \
        -H "Content-Type: application/json" \
        -d '{"member_id": 1}'
   ```
+  Either way the event is flagged as manual and shows a "No card" mark on
+  the board and the dashboard until that person's next tap.
   (member IDs are assigned in the order they appear in `config/members.json`,
   starting at 1 — check `/api/state` to confirm which id maps to whom.)
+- **Add someone before you have their EDIPI**, then fill it in later without
+  losing the attendance they built up in the meantime:
+  ```bash
+  python3 scripts/add-member.py --pending "Ada Vance"   # on the board now
+  python3 scripts/add-member.py --replace "Ada Vance"   # when the number arrives
+  ```
+  Until `--replace`, they check in by clicking their name on the kiosk and
+  every event is marked `NO CARD`. `--replace` rewrites their existing member
+  row rather than adding a second one - see "3. Fill in your roster" above for
+  why hand-editing the hash in `config/members.json` instead splits their
+  history in two. Both need a restart to take effect.
 - **Log someone in/out at a past time** (the reader was down, or they forgot
   to tap) — `manual-toggle` above always stamps the current time, so use this
   instead when the time matters:
