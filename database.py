@@ -396,6 +396,87 @@ def set_event_note(event_id: int, note: str | None):
     conn.commit()
 
 
+def delete_event(event_id: int) -> bool:
+    """
+    Remove a single event row - a duplicate tap, or somebody who checked in
+    on the wrong name. Returns False if there was no such row.
+
+    The events table is append-only everywhere else in this app for a reason
+    (it *is* the attendance record), so this logs what it removed at WARNING:
+    once the row is gone the journal is the only remaining evidence that it
+    ever existed. Deleting an event re-derives everything computed from the
+    log - the member's current status is whatever event is now most recent,
+    and get_weekly_hours() re-pairs around the hole - so removing one half of
+    an in/out pair leaves the other half unmatched. That is the same
+    positional pairing scripts/add-event.py warns about when inserting.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT events.action, events.timestamp, members.display_name
+        FROM events JOIN members ON members.id = events.member_id
+        WHERE events.id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+    conn.commit()
+    log.warning(
+        "Deleted event %d: %s checked %s at %s",
+        event_id, row["display_name"], row["action"], row["timestamp"],
+    )
+    return True
+
+
+def backup_db() -> Path:
+    """
+    Snapshot the database beside itself as labtrack-<stamp>.bak, through
+    sqlite's own backup API rather than a file copy: other threads hold live
+    connections (the CAC reader writes from one), and copying the file out
+    from under an in-flight transaction can capture a torn page plus none of
+    the -wal/-journal that would repair it. The backup API takes a consistent
+    snapshot while they run.
+
+    Backups are gitignored and never pruned automatically - clearing the log
+    is rare and a stale copy is the whole point of having one.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = DB_PATH.with_name(f"{DB_PATH.stem}-{stamp}.bak")
+    target = sqlite3.connect(dest)
+    try:
+        get_conn().backup(target)
+    finally:
+        target.close()
+    return dest
+
+
+def clear_events() -> dict:
+    """
+    Empty the attendance log, keeping the roster. Returns how many rows went
+    and the name of the backup taken first.
+
+    Members are deliberately untouched: they are synced from
+    config/members.json, so deleting them here would only have them come
+    straight back on the next startup, and events reference members.id.
+    Wiping the log is enough to reset the board - every member reads as 'out'
+    once nothing is more recent, and weekly hours fall to zero.
+
+    A backup is taken unconditionally rather than offered as an option. This
+    is the one irreversible action in the app, it is a button on a page
+    anyone with the shared password can reach, and the thing it destroys is
+    the record this system exists to keep.
+    """
+    conn = get_conn()
+    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    backup = backup_db()
+    conn.execute("DELETE FROM events")
+    conn.commit()
+    log.warning("Cleared %d event(s) from the log - backup saved to %s", count, backup)
+    return {"deleted": count, "backup": backup.name}
+
+
 def get_roster_status():
     """All active members with their current status, for the kiosk/dashboard."""
     conn = get_conn()

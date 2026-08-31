@@ -339,6 +339,33 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   because none of it saw a card. An unknown `member_id` is a 400, not a 500:
   a kiosk page left open across a roster change is holding stale ids, which
   is not a server fault.
+- **Dashboard admin section** — the folded-away `<details>` at the bottom of
+  `/dashboard`, the one place events are *removed* rather than appended: a
+  `×` on each row of Recent activity (`DELETE /api/events/<id>`) for a
+  duplicate tap or somebody logged against the wrong name, and "Clear all
+  events" (`POST /api/events/clear`) for a fresh start. Four things about it:
+  - **Clearing snapshots the database first**, unconditionally, via
+    `db.backup_db()` → `labtrack-<stamp>.bak` beside `labtrack.db`
+    (gitignored, never pruned). It goes through sqlite's backup API rather
+    than copying the file, because the CAC reader thread holds a live
+    connection and a plain copy can catch a torn page. The dashboard reports
+    the backup's filename afterward - a snapshot nobody is told about is not
+    a recovery path.
+  - **Clearing empties `events` only.** Members are synced from
+    `config/members.json` on every startup, so deleting them here would just
+    bring them back; wiping the log is already enough to reset the board,
+    since everyone reads as `out` once nothing is more recent.
+  - **`POST /api/events/clear` requires `{"confirm": "DELETE"}` in the body**
+    and the page makes the user type it. The endpoint is on the lab network
+    behind one shared password, and requests from the Pi itself skip even
+    that (see `webauth.py`), so the body is what stops a stray call from
+    emptying the log.
+  - **Both log at WARNING what they removed** (`database.py`). Once a row is
+    gone the journal is the only remaining evidence it existed. Deleting is
+    otherwise unguarded on purpose: everything derived from the log
+    re-derives on the next poll, so removing one half of an in/out pair
+    leaves the other unmatched - the same positional pairing
+    `scripts/add-event.py` warns about when inserting.
 - **`cac_reader.py`** — background thread (pyscard's `CardMonitor`) that
   watches the physical reader and identifies the card via PKCS#11, without
   requiring a PIN (reading the PIV Authentication cert, a public object, is
@@ -465,7 +492,9 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   history reconnects. A config that parses but lists no members is treated
   as a bad edit and deactivates nobody — otherwise one stray comma blanks
   the whole board until someone notices and restarts) and
-  `events` (append-only check-in/out log; `action` is `'in'`/`'out'`,
+  `events` (check-in/out log, appended to by every path that writes one and
+  edited nowhere except the dashboard's admin section above; `action` is
+  `'in'`/`'out'`,
   current status for a member = the most recent event, `note` is the
   optional checkout comment, `manual` is 1 when no card was read - see
   "Checking in without a card" above. `get_roster_status()` surfaces

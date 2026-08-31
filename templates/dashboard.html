@@ -32,9 +32,50 @@
   <section class="dash__section">
     <h2>Recent activity</h2>
     <table class="dash__table" id="events-table">
-      <thead><tr><th>Time</th><th>Member</th><th>Action</th><th>Note</th></tr></thead>
+      <thead><tr><th>Time</th><th>Member</th><th>Action</th><th>Note</th><th></th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <!-- Destructive controls, folded away behind a <details> so the page still
+       reads as a status board and "clear the log" is never one stray click
+       from the roster. Everything here is guarded by the same shared
+       password as the rest of the dashboard (webauth.py). -->
+  <section class="dash__section">
+    <details class="admin">
+      <summary class="admin__summary">Admin</summary>
+      <div class="admin__body">
+        <div class="admin__item">
+          <div>
+            <div class="admin__title">Delete a single event</div>
+            <p class="admin__help">
+              Use the &times; on any row in Recent activity. Hours are re-paired
+              from what is left, so deleting one half of a check-in/check-out
+              pair leaves the other unmatched.
+            </p>
+          </div>
+        </div>
+        <div class="admin__item">
+          <div>
+            <div class="admin__title">Clear all events</div>
+            <p class="admin__help">
+              Deletes the entire attendance log. The roster is kept and everyone
+              reads as out. A timestamped <code>.bak</code> copy of the database
+              is saved on the Pi first.
+            </p>
+          </div>
+          <form class="admin__actions" id="clear-form">
+            <input type="text" id="clear-confirm" class="admin__input"
+                   placeholder="Type DELETE" autocomplete="off"
+                   aria-label="Type DELETE to confirm">
+            <button type="submit" id="clear-btn" class="admin__btn admin__btn--danger">
+              Clear all events
+            </button>
+          </form>
+        </div>
+        <div class="admin__status" id="admin-status" role="status"></div>
+      </div>
+    </details>
   </section>
 
   <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>

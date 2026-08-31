@@ -18,3 +18,6 @@ config/roster.key
 # The shared password for viewing the dashboard from another PC. Generated
 # on first run; per-Pi, so it never belongs in the repo.
 config/dashboard.key
+
+# Snapshots taken before "clear all events" on the dashboard.
+labtrack-*.bak

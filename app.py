@@ -201,6 +201,42 @@ def api_set_note(event_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/events/<int:event_id>", methods=["DELETE"])
+def api_delete_event(event_id):
+    """
+    Remove one event - the dashboard's per-row delete, for a duplicate tap or
+    somebody logged against the wrong name. Everything derived from the log
+    (current status, weekly hours) re-derives from what's left on the next
+    poll, so there is nothing else to update.
+
+    A missing row is a 404 rather than a 500: two people on two dashboards
+    deleting the same row, or a page holding ids from before a clear, is not
+    a server fault.
+    """
+    if not db.delete_event(event_id):
+        return jsonify({"error": "no such event"}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/events/clear", methods=["POST"])
+def api_clear_events():
+    """
+    Empty the attendance log, keeping the roster. db.clear_events() snapshots
+    the database first and reports the backup's name, which is what the
+    dashboard shows afterward - the point of the snapshot is lost if nobody
+    is told it exists.
+
+    The literal "DELETE" in the body is required so this can't be fired by a
+    bare curl (or a mis-click that reaches the endpoint some other way)
+    without saying what it is doing; the dashboard makes the user type it.
+    Note that a request from the Pi itself skips the shared password - same
+    exemption /api/manual-toggle lives with, see webauth.py.
+    """
+    if (request.json or {}).get("confirm") != "DELETE":
+        return jsonify({"error": 'confirm must be "DELETE"'}), 400
+    return jsonify(db.clear_events())
+
+
 @app.route("/api/weekly-hours")
 def api_weekly_hours():
     return jsonify(db.get_weekly_hours())

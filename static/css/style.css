@@ -745,7 +745,14 @@ body.dashboard {
 
 .dash__roster {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  /* auto-fit, not auto-fill. auto-fill keeps every 220px track the width
+     allows whether or not a card lands in it, and an empty track is still
+     laid out - so with 5 members on a wide monitor the leftover track showed
+     as a pale block of the container's hairline background hanging off the
+     right of the strip. auto-fit collapses the empty ones, so the 1fr share
+     is split between the cards that actually exist and the strip always
+     reaches the right edge however many members are on the roster. */
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 1px;
   background: var(--hairline);
   border: 1px solid var(--hairline);
@@ -782,3 +789,156 @@ body.dashboard {
 
 .action-in { color: var(--phosphor); }
 .action-out { color: var(--amber); }
+
+/* ---- admin controls (dashboard only) ----------------------------- */
+/* Deliberately quieter than everything above it: this section is read once
+   in a blue moon, and the page's job the rest of the time is the roster.
+   Flat colours throughout, no shadows - the dashboard is usually open on a
+   PC, but the rules in Performance are the house style either way. */
+.admin {
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--graphite-800);
+}
+
+.admin__summary {
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-mid);
+}
+
+.admin__summary:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: -2px;
+}
+
+.admin__body {
+  border-top: 1px solid var(--hairline);
+  padding: 1rem;
+}
+
+.admin__item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--graphite-700);
+}
+
+.admin__item:last-of-type {
+  border-bottom: 0;
+}
+
+.admin__title {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.admin__help {
+  margin: 0.35rem 0 0;
+  max-width: 62ch;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  color: var(--text-low);
+}
+
+.admin__help code {
+  font-family: var(--mono);
+  color: var(--text-mid);
+}
+
+.admin__actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.admin__input {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.7rem;
+  width: 11rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--graphite-900);
+  color: var(--text-hi);
+}
+
+.admin__input::placeholder { color: var(--text-low); }
+
+.admin__input:focus-visible,
+.admin__btn:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+.admin__btn {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0.55rem 1.1rem;
+  border-radius: 6px;
+  border: 1px solid var(--hairline);
+  background: var(--graphite-900);
+  color: var(--text-mid);
+  cursor: pointer;
+}
+
+.admin__btn--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.admin__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Empty until something has been done, so it takes no room on an untouched
+   page - :empty rather than a class toggled from JS, since the element's
+   text content is the only state it has. */
+.admin__status {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--text-mid);
+  padding-top: 0.9rem;
+}
+
+.admin__status:empty { display: none; }
+.admin__status.is-error { color: var(--danger); }
+
+/* The per-row delete in Recent activity. Dim until the row is hovered so a
+   column of red crosses isn't the loudest thing on the log, and sized to the
+   text rather than as a button so the rows keep their height. */
+.dash__table-action {
+  width: 2.5rem;
+  text-align: right;
+}
+
+.row-delete {
+  appearance: none;
+  border: 0;
+  background: none;
+  color: var(--text-low);
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+  cursor: pointer;
+}
+
+.dash__table tr:hover .row-delete,
+.row-delete:focus-visible {
+  color: var(--danger);
+}
+
+.row-delete:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
