@@ -62,12 +62,14 @@ labtrack/
   config/members.json       Hashed EDIPI -> name roster (scripts/add-member.py)
   config/roster.key         Secret salt for those hashes - back this up, never commit it
   config/objectives.json    Screensaver text content (edit any time)
+  config/decode-mode        hardware|software video decode (scripts/set-decode.sh)
   templates/                Kiosk + dashboard HTML
   static/                   CSS, JS, and a media/ folder for slide pictures
                             and the background video
   health.py                 Once-a-minute health heartbeat for long runs
   systemd/labtrack.service   Runs the app on boot
   systemd/labtrack-reboot.*  Timer + unit for the nightly 00:00 reboot
+  systemd/*.rules            polkit rules: card reader access, and reboot
   autostart/*.desktop       Launches Chromium kiosk mode on desktop login
   identity.py               One-way hashing of EDIPIs for the roster
   scripts/setup.sh          Installs everything below in one go
@@ -75,6 +77,8 @@ labtrack/
                             (--pending for one you don't have an EDIPI for yet)
   scripts/add-event.py      Logs a check-in/out at a time you name
   scripts/soak-report.sh    Summarises a long unattended run
+  scripts/build-loop.sh     Builds the long-playing background video (run on the Pi)
+  scripts/set-decode.sh     Switches the kiosk between hardware/software decode
 ```
 
 ## Step-by-step setup on the Pi
@@ -341,18 +345,37 @@ optional looping background video.
   render on the 1080p panel, and anything bigger just costs the Pi decode
   time without looking better. If a picture is missing or won't load, that
   slide quietly falls back to text only.
-- **Background video** (optional): drop one `.mp4` into `static/media/`,
-  then set `BACKGROUND_VIDEO` near the bottom of `static/js/main.js` to its
-  filename. It loops continuously behind every slide, with a flat dim over
-  it so the text stays readable. Leave `BACKGROUND_VIDEO = ""` for no
-  background.
+- **Background video** (optional): drop one `.mp4` into `static/media/` named
+  `background.mp4`. It loops continuously behind every slide, with a flat dim
+  over it so the text stays readable. Delete it for no background.
+
+  The filename is chosen server-side by `BACKGROUND_VIDEO_CANDIDATES` in
+  `app.py`, which prefers `background-long.mp4` and falls back to
+  `background.mp4`. Edit that tuple to use different footage; set it to `()`
+  for no background at all. Nothing in `main.js` names a file any more — it
+  reads what the server rendered into `data-video`.
+
+  **After changing the video, rebuild the long loop:**
+
+  ```bash
+  scripts/build-loop.sh 10        # 10-minute loop; re-run after any change
+  ```
+
+  This is not optional polish. The kiosk loops by seeking back to the start
+  before end-of-stream, and each of those seeks is a chance to hit a
+  `bcm2835_codec` kernel bug that freezes the whole display — see "Background
+  video freezes" below. `build-loop.sh` stream-copies the 12s master into a
+  10-minute file so the seek happens 50x less often. It is lossless (no
+  re-encode) and takes about two seconds. `scripts/setup.sh` runs it for you
+  on first install.
 
   Only `background.mp4` is tracked in git; `.gitignore` excludes every other
-  video in `static/media/`. Keep your source footage and any encode
-  experiments outside the repo or under those ignore rules — committed
-  binaries are permanent, and this history already had to be rewritten once
-  to remove 131MB of them. The Pi picks the video up through `git pull`
-  along with everything else.
+  video in `static/media/`, which includes the ~900MB `background-long.mp4`
+  this produces. Keep your source footage and any encode experiments outside
+  the repo or under those ignore rules — committed binaries are permanent,
+  and this history already had to be rewritten once to remove 131MB of them.
+  The Pi picks the master up through `git pull` and builds the long file
+  locally.
 
   **The last 5 seconds of the file never play.** `main.js` wraps playback
   back to the start early, because letting it reach the end of the file
@@ -442,9 +465,13 @@ optional looping background video.
   inside the Pi 4's hardware decode ceiling (1920x1920); HEVC/VP9/AV1 or
   anything wider falls back to software decode and pegs the CPU. `-an`
   drops the audio track — the kiosk plays muted, so decoding audio is pure
-  waste. Keep the clip short (20–60s) and make the last frame resemble the
-  first, since it restarts on a hard cut. If the file is missing or won't
-  decode, the slides fall back to the flat panel background.
+  waste. Make the last frame resemble the first, since it restarts on a hard
+  cut. If the file is missing or won't decode, the slides fall back to the
+  flat panel background.
+
+  **Do not try to keep the clip short.** Duration costs nothing per frame,
+  and a longer loop is actively safer here — it is the whole point of
+  `build-loop.sh`. What matters is the encode settings above, not the length.
 
 ### 8. Reboot and confirm the kiosk comes up unattended
 
@@ -660,7 +687,7 @@ obviously related:
 | Health heartbeat, once a minute | `health.py` | `journalctl -u labtrack \| grep health` |
 | Errors the kiosk page saw | `report()` in `main.js` → `/api/client-log` | `journalctl -u labtrack \| grep client` |
 | Card reader plugged/unplugged | `start_reader_watch()` in `cac_reader.py` | `journalctl -u labtrack \| grep -i "card reader"` |
-| Chromium's own output | the `logger` pipe in `autostart/labwc-autostart` | `journalctl -t labtrack-chromium` |
+| Chromium's own output, and which decode path it launched with | the `logger` pipe in `autostart/labwc-autostart` | `journalctl -t labtrack-chromium` |
 | OOM kills, undervoltage, resets | the kernel | `journalctl -k` |
 
 The heartbeat line looks like this, and is INFO normally, WARNING when
@@ -711,10 +738,13 @@ warning mentions VCHI or vchiq, run `sudo usermod -aG video admin` and reboot.
 scripts/soak-report.sh "3 days ago"
 ```
 
-That pulls out reboots, OOM kills, undervoltage events, app errors, anything
-the kiosk reported about itself, Chromium complaints, and the memory trend
-over the window — a steadily falling `mem_avail` or rising `chromium_mem`
-across days is the shape of a leak. With no argument it covers the last week.
+That pulls out reboots, OOM kills, undervoltage events, kernel oopses and
+driver warnings, reboots the app asked for, app errors, anything the kiosk
+reported about itself, Chromium complaints, and the trend over the window. A
+steadily falling `mem_avail` or rising `chromium_mem` across days is the shape
+of a leak; a `load1` that climbs to the core count and stays there while
+`dstate` is non-zero is the shape of a wedged driver (see "Background video
+freezes"). With no argument it covers the last week.
 
 To watch live while you set things up:
 
@@ -737,6 +767,153 @@ not come back, so a retry loop would only report the same stall forever.
 Two related reports come from the same watchdog: `video-never-started` (no
 first frame within 30s — what the non-faststart range-request stall looks
 like) and `video-too-short` (a replacement clip shorter than `LOOP_TAIL_S`).
+
+**A `video-stall` report now also reboots the Pi** — see "Background video
+freezes" below for why, and "Automatic recovery" for how.
+
+## Background video freezes
+
+There are two distinct video failures on this hardware, and they are easy to
+confuse because both end with a picture that has stopped moving. Step 7
+covers the first. This is the second, and it is much worse: it takes the
+whole display with it, not just the video.
+
+**Symptom.** The clock stops. The background video is not merely frozen — it
+is gone entirely, replaced by the flat panel background. Moving the mouse
+produces no cursor. Meanwhile the app is perfectly healthy: `systemctl status
+labtrack` is active with zero restarts, the dashboard works from another PC,
+and `/api/health` reports `"ok": true` with no concerns. Only a reboot clears
+it.
+
+**What is actually happening.** Wrapping the video back to the start makes
+Chromium issue `VIDIOC_STREAMOFF` on the V4L2 m2m decoder. There is a race in
+`bcm2835_codec`'s `stop_streaming` that leaves buffers in an active state; vb2
+then warns, and a kernel workqueue thread dereferences NULL freeing the
+dma-buf:
+
+```
+videobuf2_common: driver bug: stop_streaming operation is leaving buffer 0 in active state
+Unable to handle kernel NULL pointer dereference at virtual address 0000000000000248
+Internal error: Oops: 0000000096000005 [#1] SMP
+Workqueue: events delayed_fput
+pc : dma_release_from_dev_coherent+0x1c/0xd0
+       dma_free_attrs / vb2_dc_put / dma_buf_release / __fput / delayed_fput
+```
+
+The kworker dies holding locks nothing will ever release. Tasks then pile up
+behind it one at a time, and when the compositor is one of them the screen
+stops updating — about 45 minutes after the oops in the case we measured.
+
+**How to recognise it in the logs.** The giveaway is in the health heartbeat,
+and it is counter-intuitive: **load average pinned at exactly the core count
+while the CPU runs cold.**
+
+```
+Sep 02 06:50 load1=1.77 temp=45.8    <- video decoding normally
+Sep 02 06:55 ... kernel oops ...     <- and the client reports video-stall
+Sep 02 07:01 load1=1.00 temp=36.5    <- decode stopped, Pi cooled 9C
+Sep 02 07:28 load1=1.76 temp=38.0    <- tasks begin blocking
+Sep 02 07:43 load1=4.03 temp=37.5    <- four stuck; display froze at 07:41
+Sep 02 09:01 load1=4.01 temp=37.0    <- flat at 4.0 for hours
+```
+
+Four busy cores on a Pi 4 mean 65–80°C. At 37°C nothing is running: Linux
+counts tasks in uninterruptible ("D") sleep toward load average, and these are
+parked forever. `health.py` now reports a `dstate=` count alongside `load1=`
+and warns when a process has been stuck for over five minutes, so this shows
+up as a WARNING within minutes instead of going unnoticed for hours.
+`scripts/soak-report.sh` has a "Kernel oopses and driver warnings" section for
+the same reason — it previously grepped the kernel only for OOM kills and
+undervoltage, and reported "(none)" straight through this.
+
+**What has been done about it.** It is a kernel driver bug, so nothing in this
+repo can fix it — only make it rarer and recover from it faster:
+
+- `scripts/build-loop.sh` makes the loop 10 minutes instead of 12 seconds, so
+  the risky seek happens 50x less often. Observed rate is roughly one failure
+  per 2,000 seeks, which moves the expected interval from about seven hours to
+  about two weeks.
+- A `video-stall` report now triggers an automatic reboot (below).
+- `scripts/set-decode.sh software` avoids the V4L2 path entirely, at the cost
+  of a CPU core.
+
+If you want to escalate it upstream, `raspberrypi/linux` is the place, and the
+trace above plus a clip looping on hardware decode for a few hours is the
+report.
+
+## Automatic recovery
+
+When the kiosk reports `video-stall`, the server schedules a reboot 30 seconds
+out and the board says so on screen ("Display fault — restarting in 30s")
+before it goes. The reasoning is that the alternative is worse: the display is
+already dead at that point, and without this it stays dead until somebody
+walks past and notices, or until the nightly 00:00 reboot.
+
+Two guards keep this from becoming its own problem:
+
+- **Nothing reboots a Pi that has been up less than 30 minutes.** A fault that
+  reasserts itself every boot would otherwise cycle the board forever, and a
+  kiosk stuck in a reboot loop is far worse than one showing a flat
+  background — nobody can check in during a loop. When the guard blocks a
+  reboot it says so in the journal and the board degrades to the flat
+  background instead.
+- **Only an explicit set of client-log keys can trigger it** (`video-stall`,
+  currently). Ordinary JS errors and failed polls never reboot anything.
+
+It needs the polkit rule in `systemd/40-labtrack-reboot.rules`, which
+`scripts/setup.sh` installs — the service runs as `admin`, not root, and
+logind refuses without it. An install predating that file needs:
+
+```bash
+sudo cp systemd/40-labtrack-reboot.rules /etc/polkit-1/rules.d/
+sudo systemctl restart polkit
+```
+
+If it is missing, the reboot fails and the journal says so explicitly rather
+than leaving the board sitting under a notice for a reboot that never comes.
+
+**What if the reboot itself hangs?** It is a fair worry — by the time this
+fires the kernel has already oopsed, and a shutdown that has to wait on tasks
+stuck in uninterruptible sleep can stall. Two things bound it. The reboot is
+requested about 50 seconds after the oops, when only one task is typically
+stuck and shutdown still proceeds normally (the display does not freeze until
+~45 minutes in). And systemd is already using the Pi's hardware watchdog —
+`Using hardware watchdog 'Broadcom BCM2835 Watchdog timer'` appears in every
+boot log — which it arms across the reboot path, so a shutdown that genuinely
+wedges gets force-reset rather than leaving the Pi off. Nothing needs
+configuring for that; it is the default.
+
+Check what has happened:
+
+```bash
+journalctl -u labtrack | grep -E 'rebooting|not rebooting'
+```
+
+## Switching video decode
+
+Hardware decode is the default and what the Pi wants — 1080p H.264 on the
+V3D/V4L2 path is nearly free, while software decode costs about a full core
+permanently. But every video failure this board has had came from the V4L2
+stack, and neither reproduces under software decode, so it is the escape hatch
+when you need the board up while you work out what the hardware path is doing.
+
+```bash
+scripts/set-decode.sh              # report the current setting
+scripts/set-decode.sh software     # then: sudo reboot
+scripts/set-decode.sh hardware     # back again
+```
+
+It writes one word to `config/decode-mode`, which the kiosk autostart reads at
+every Chromium launch, so a reboot is what applies it. The setting is
+per-Pi and gitignored, so `git pull` will not fight a local change. Confirm
+which path is live with:
+
+```bash
+journalctl -t labtrack-chromium | grep 'video decode'
+```
+
+Expect `load1` up by roughly 1.0 and a warmer Pi in the health line while
+software decode is active.
 
 ## Nightly reboot
 
@@ -784,6 +961,11 @@ accruing. That's unchanged by this timer; it's the same as any other restart.
 - **View logs:** `sudo journalctl -u labtrack -f`
 - **Check on a long run:** `scripts/soak-report.sh` (see "Watching a long
   run" above), or `curl -s http://localhost:5000/api/health` for one sample
+- **After changing the background video:** `scripts/build-loop.sh 10` (see
+  "Background video freezes" — the long loop is what keeps the display from
+  wedging, and it is not tracked in git so it must be rebuilt on the Pi)
+- **If the video misbehaves:** `scripts/set-decode.sh software && sudo reboot`
+  (see "Switching video decode")
 - **Manually toggle someone in/out** (if the reader is down, or for testing)
   without touching the card reader. From the kiosk itself this is a click on
   the person's name - see "Checking in without a card" above - and over the

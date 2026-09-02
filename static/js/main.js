@@ -162,14 +162,13 @@ function renderRoster(roster) {
 
 // The background video keeps playing behind the confirmation overlays, so the
 // body needs to know when one is up (see .is-overlay in style.css). Derived
-// from the two overlays' actual state rather than toggled independently by
-// each: they overlap when a tap finishes and the toast replaces the "reading
-// card" overlay, and independent toggles would race there.
+// from the overlays' actual state rather than toggled independently by each:
+// they overlap when a tap finishes and the toast replaces the "reading card"
+// overlay, and independent toggles would race there.
+const OVERLAY_IDS = ["toast", "confirm", "reading-overlay", "reboot"];
 function syncOverlayState() {
-  const shown =
-    document.getElementById("toast").classList.contains("is-visible") ||
-    document.getElementById("confirm").classList.contains("is-visible") ||
-    document.getElementById("reading-overlay").classList.contains("is-visible");
+  const shown = OVERLAY_IDS.some(
+    (id) => document.getElementById(id).classList.contains("is-visible"));
   document.body.classList.toggle("is-overlay", shown);
 }
 
@@ -464,6 +463,49 @@ function setReading(active) {
   syncOverlayState();
 }
 
+// --- reboot notice ---------------------------------------------------
+// The server schedules a reboot when the board reaches a state only a reboot
+// clears (see request_reboot in app.py). It is worth announcing rather than
+// just doing: this screen stands in the open all day, and a board that blanks
+// with no explanation reads as a dead Pi to whoever is standing in front of
+// it. The countdown is short because the display is already broken by the
+// time this appears - it buys an explanation, not a chance to intervene.
+
+const rebootEl = document.getElementById("reboot");
+const rebootCountEl = document.getElementById("reboot-count");
+
+// null = not counting down. Held as a local deadline rather than re-read from
+// each poll, so the number ticks evenly regardless of poll jitter and a reply
+// that arrives out of order can't make it jump back up.
+let rebootDeadline = null;
+let rebootTimer = null;
+
+function tickReboot() {
+  const left = Math.max(0, Math.round((rebootDeadline - Date.now()) / 1000));
+  rebootCountEl.textContent = left > 0 ? `Restarting in ${left}s` : "Restarting now\u2026";
+}
+
+function renderReboot(reboot) {
+  if (!reboot) {
+    // Cancelled - the only way back is request_reboot failing to reach
+    // systemctl, which un-schedules itself so the board doesn't sit under a
+    // notice for a reboot that is never coming.
+    if (rebootDeadline === null) return;
+    rebootDeadline = null;
+    clearInterval(rebootTimer);
+    rebootTimer = null;
+    rebootEl.classList.remove("is-visible");
+    syncOverlayState();
+    return;
+  }
+  if (rebootDeadline !== null) return;   // already counting down
+  rebootDeadline = Date.now() + (reboot.in_s || 0) * 1000;
+  rebootEl.classList.add("is-visible");
+  syncOverlayState();
+  tickReboot();
+  rebootTimer = setInterval(tickReboot, 1000);
+}
+
 // Polls can overlap: submitConfirm() fires one the instant a click has been
 // recorded instead of waiting out the interval, so two are briefly in flight.
 // If the older reply lands second it carries the pre-click state - repainting
@@ -486,6 +528,7 @@ async function poll() {
     renderRoster(data.roster);
     renderReader(data.reader);
     setReading(!!data.reading);
+    renderReboot(data.reboot);
 
     const incomingId = data.last_event && data.last_event.event_id;
     if (lastEventId === null) {
@@ -510,13 +553,17 @@ poll();
 // Slides swap instantly - a crossfade would mean compositing two full-panel
 // layers on every rotation (see Performance in CLAUDE.md).
 
-// Filename of the looping background video, inside static/media/. Leave it
-// empty ("") for no background - the panel then just uses its flat card
-// colour. There is deliberately no directory-listing endpoint, so name the
-// file here by hand after dropping it in. It must be H.264 and no wider than
-// 1920px, or the Pi decodes it in software (README step 7). Note that its
-// last LOOP_TAIL_S seconds never play - see the wrap-around below.
-const BACKGROUND_VIDEO = "background.mp4";
+// Filename of the looping background video, inside static/media/. Empty
+// means no background - the panel then just uses its flat card colour.
+//
+// Chosen server-side and rendered into data-video on the element (see
+// BACKGROUND_VIDEO_CANDIDATES in app.py) rather than named here, because
+// which file exists differs per machine: the Pi runs scripts/build-loop.sh to
+// produce a long-playing background-long.mp4, and a dev checkout has only the
+// short background.mp4 that ships in git. Whatever it names must be H.264 and
+// no wider than 1920px, or the Pi decodes it in software (README step 7), and
+// its last LOOP_TAIL_S seconds never play - see the wrap-around below.
+const BACKGROUND_VIDEO = document.getElementById("media-bg").dataset.video || "";
 
 // Seconds of the clip held back from ever playing, so end-of-stream is never
 // reached. The Pi's V4L2 hardware decoder (bcm2835-codec) wedges on the

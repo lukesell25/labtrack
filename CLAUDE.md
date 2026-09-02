@@ -122,15 +122,37 @@ changed, so an objective coming back around on the next rotation doesn't
 re-decode the same picture. A picture that fails to load drops back to a
 text-only slide and clears `dataset.file`, so the next rotation retries it.
 
-The background video is named by the `BACKGROUND_VIDEO` constant in
-`main.js` (empty string = none); there's no directory-listing endpoint, so
-it's set by hand after dropping the file in `static/media/`. Only
-`background.mp4` itself is tracked in git — `.gitignore` excludes every
-other video in that directory, because encode experiments and multi-MB
-sources are permanent once committed (the repo's history had to be
-rewritten once already to get 131MB of them back out). Keep sources
-elsewhere, or let the ignore rule do its job. Things worth knowing before
-changing the video:
+The background video is chosen **server-side** by
+`BACKGROUND_VIDEO_CANDIDATES` in `app.py` — the first filename in that tuple
+that exists in `static/media/` wins, and no match means no background.
+`kiosk()` renders it into `data-video` on the `<video>` element and `main.js`
+reads it from there; `BACKGROUND_VIDEO` in `main.js` is no longer a
+hand-edited constant. The indirection exists because the two candidates are
+produced differently: `background.mp4` is the short master tracked in git,
+and `background-long.mp4` is the ~900MB file `scripts/build-loop.sh`
+concatenates from it **on the Pi**, so which one is present differs per
+machine and a hardcoded name would be wrong on one of them.
+
+Only `background.mp4` itself is tracked in git — `.gitignore` excludes every
+other video in that directory (the generated long file included), because
+encode experiments and multi-MB sources are permanent once committed (the
+repo's history had to be rewritten once already to get 131MB of them back
+out). Keep sources elsewhere, or let the ignore rule do its job. Things
+worth knowing before changing the video:
+
+- **The loop is long on purpose, and rebuilding it after any change to
+  `background.mp4` is not optional.** Every wrap-around seek is a chance to
+  hit a `bcm2835_codec` `stop_streaming` race that oopses the kernel and
+  freezes the entire display — not just the video (see "The stop_streaming
+  freeze" below). Observed at roughly one failure per 2,000 seeks, which on
+  the 12s master is about once every seven hours. `scripts/build-loop.sh`
+  stream-copies the master into a 10-minute loop, so the seek happens 50x
+  less often and the expected interval goes to about two weeks. It cuts the
+  master **by frame count, never by `-t`**: a stream copy keeps whole
+  packets and `-t 12` hands back 362 frames rather than 360, which would
+  replay two frames at every one of the 50 joins. Verified seamless — the
+  join measures 26.8dB against 27.1-27.3dB for an ordinary frame step, the
+  same figure as the master's own loop point.
 
 - **The `<video>` must not carry a `loop` attribute, and playback must
   never be allowed to reach the end of the file.** `main.js` loops it by
@@ -180,8 +202,8 @@ changing the video:
 
 ### Overlays over the background video
 
-The toast, the "reading card" overlay and the click-to-toggle confirmation
-dialog are full-screen `position: fixed` layers. When a background video is
+The toast, the "reading card" overlay, the click-to-toggle confirmation
+dialog and the reboot notice are full-screen `position: fixed` layers. When a background video is
 configured they go translucent so it stays visible through the whole tap
 flow; with no video they stay fully opaque, which lets the compositor skip
 painting the board underneath entirely. That's why every rule is gated on
@@ -191,14 +213,17 @@ Three pieces of that treatment have to move together, and missing any one
 of them looks broken rather than subtly wrong:
 
 - **`body.is-overlay`** is toggled by `syncOverlayState()`, which *derives*
-  the flag from whether any of the three currently has `is-visible`. It is
+  the flag from whether any of them currently has `is-visible`. It is
   deliberately not one toggler per overlay: they overlap when a tap
   completes and the toast replaces the reading overlay (or the confirmation
   dialog), and independent toggles race there. Any new code path that shows
-  or hides one must go through `setToastVisible()` / `closeConfirm()` and
-  then `syncOverlayState()`, not `classList` directly. They stack
-  reading (55) → confirm (58) → toast (60): a card presented while a dialog
-  is open is the more important thing to say, and the toast supersedes both.
+  or hides one must go through `setToastVisible()` / `closeConfirm()` /
+  `renderReboot()` and then `syncOverlayState()`, not `classList` directly.
+  `OVERLAY_IDS` is the single list the flag is derived from — a new overlay
+  goes in there, not into another `||`. They stack reading (55) → confirm
+  (58) → toast (60) → reboot (70): a card presented while a dialog is open is
+  the more important thing to say, the toast supersedes both, and the screen
+  going away shortly supersedes everything.
 - **`.media__scrim` is hidden while an overlay is up.** Stacking the
   panel's 0.72 scrim under the overlay's 0.72 scrim leaves only ~8% of the
   video coming through — visibly black, and the reason the effect looks
@@ -294,6 +319,33 @@ Rules that matter for anything new:
   panel). ~800px wide is the right size; anything larger is decoded and
   scaled down for nothing.
 
+- **The wrap-around seek is itself dangerous, and the loop length is the
+  mitigation.** `LOOP_TAIL_S` keeps playback away from end-of-stream, but
+  `currentTime = 0` makes Chromium issue `VIDIOC_STREAMOFF` on the V4L2 m2m
+  decoder, and `bcm2835_codec` has a race in `stop_streaming` that leaves
+  buffers active. vb2 warns (`driver bug: stop_streaming operation is leaving
+  buffer N in active state`), then a kernel workqueue thread NULL-derefs
+  freeing the dma-buf (`dma_release_from_dev_coherent` ← `vb2_dc_put` ←
+  `dma_buf_release` ← `delayed_fput`) and dies holding locks nothing will
+  release. Tasks then block in uninterruptible sleep one at a time until the
+  compositor is among them and the **whole display** freezes — measured at
+  ~45 minutes after the oops. Confirmed on real hardware, kernel
+  `6.18.39+rpt-rpi-v8`. Nothing in userspace can undo it; only a reboot can.
+  Three things follow, and all three are load-bearing:
+  - the loop is 10 minutes rather than 12 seconds
+    (`scripts/build-loop.sh`), because the hazard is per-seek — roughly one
+    failure per 2,000 of them;
+  - a `video-stall` report reboots the Pi (`request_reboot()` in `app.py`);
+  - `health.py` reports `dstate=` so the wedge is visible before the freeze.
+
+  **The signature to recognise, because every other probe reads normal:**
+  load average pinned at exactly the core count while the CPU runs *cold*.
+  Linux counts D-state tasks in load average, so `load1=4.00` at 37°C on a Pi
+  4 means nothing is running and four things are stuck — four busy cores
+  would be 65-80°C. Throughout the incident `/api/health` reported
+  `"ok": true`, gunicorn had zero restarts, and the kiosk page kept polling
+  (`kiosk_idle=1s`) with a dead screen, because only the display was gone.
+
 **The production kiosk panel is a standard 1080p display** (~2.1M pixels).
 Development happens on a 3440x1440 ultrawide, so check layout changes at
 1920x1080 — that's the size that ships. A full-screen effect still costs a
@@ -322,7 +374,9 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   `_kiosk_status["last_poll"]`, stamped only by requests carrying
   `?src=kiosk`, so the health heartbeat can tell a dead kiosk browser from a
   live one — the dashboard polls the same endpoint from other PCs and must
-  not be able to mask it. This state is
+  not be able to mask it. And `_reboot_state` (under its own `_reboot_lock`)
+  holds a pending self-reboot, surfaced on `/api/state` as `reboot` so the
+  kiosk can count down on screen. This state is
   intentionally not persisted — only `events`/`members` in SQLite are durable.
   An `@app.errorhandler(Exception)` logs a traceback plus the offending
   method and path for anything that escapes a route, passing `HTTPException`
@@ -339,6 +393,29 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   because none of it saw a card. An unknown `member_id` is a 400, not a 500:
   a kiosk page left open across a roster change is holding stale ids, which
   is not a server fault.
+- **`request_reboot()`** — the board's only self-recovery path, for the one
+  failure it cannot otherwise survive: the `stop_streaming` freeze
+  (Performance above) kills the display while gunicorn keeps serving and the
+  page keeps polling, so nothing errors and nothing here can undo it. Called
+  from `/api/client-log` when the key is in `REBOOT_ON_CLIENT_KEYS`
+  (`video-stall`), it warns on screen for `REBOOT_WARNING_S` (30s) and then
+  runs `systemctl --no-block reboot` — `--no-block` for the same reason
+  `labtrack-reboot.service` uses it, since the reboot job has to stop this
+  service first. Three things hold it together:
+  - **`REBOOT_MIN_UPTIME_S` (30 min) is what stops a reboot loop.** A fault
+    that reasserts every boot would otherwise cycle the board forever, and a
+    kiosk that never finishes booting is far worse than one showing a flat
+    background — the freeze still lets people check in, a loop does not. The
+    stall watchdog needs ~20s to fire, so anything inside this window is a
+    fault that survived the last reboot and will survive the next.
+  - **The trigger set is explicit, not "any client error".**
+    `/api/client-log` is reachable by anything on the lab network holding the
+    dashboard password, so the set of keys that can reboot the Pi is a
+    deliberate allowlist and the rate limit already bounds it.
+  - **It needs `systemd/40-labtrack-reboot.rules`.** The service runs as
+    `admin`, not root, and logind refuses without the polkit rule. A failure
+    un-schedules itself and logs what is missing, rather than leaving the
+    board under a countdown for a reboot that never comes.
 - **Dashboard admin section** — the folded-away `<details>` at the bottom of
   `/dashboard`, the one place events are *removed* rather than appended: a
   `×` on each row of Recent activity (`DELETE /api/events/<id>`) for a
@@ -416,9 +493,21 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   reading rather than a missing measurement),
   and the whole loop body is wrapped — a monitor that dies quietly partway
   through a soak test is worse than no monitor at all. The line crosses to
-  WARNING when memory, disk, temperature, `vcgencmd get_throttled` or kiosk
-  silence look wrong, so a week-long run can be reviewed with `journalctl -p
-  warning`. Also served on demand at `/api/health`, and summarised across a
+  WARNING when memory, disk, temperature, `vcgencmd get_throttled`, kiosk
+  silence or stuck processes look wrong, so a week-long run can be reviewed
+  with `journalctl -p warning`.
+  - `dstate=` counts processes in uninterruptible sleep, and sits next to
+    `load1=` deliberately: together they separate a Pi that is *busy* from a
+    Pi that is *stuck*, because load average counts D-state tasks too. It
+    exists because of the `stop_streaming` freeze (Performance above), where
+    every other probe in this module read perfectly normal for the five hours
+    the display was dead. A pid is only *named* once it has been in D for
+    `DSTATE_STUCK_S` (5 min) — ordinary disk I/O passes through D constantly,
+    so a single reading means nothing, while the same pid minutes later means
+    it is behind a lock that is never coming back. Measured in wall time
+    rather than sample count because `sample()` is also called on demand by
+    `/api/health`, and counting calls would let an extra poll push a
+    transient over the line. Also served on demand at `/api/health`, and summarised across a
   whole run by `scripts/soak-report.sh`.
 - **`identity.py`** — the only module that knows how an EDIPI becomes a
   hash. Nothing stores the number: `config/members.json` and `members.edipi_hash`
@@ -626,9 +715,21 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   doesn't reboot itself on the next power-up, and the service calls
   `systemctl --no-block reboot` because a blocking call would wait on a job
   that has to stop the caller first), a labwc (Wayland) autostart entry for
-  kiosk-mode Chromium, a polkit rule so `pcscd` authorizes the service user (no
-  interactive login session), and a Chromium flag drop-in to skip the
-  login-keyring prompt. See README.md for the full hardware bring-up
+  kiosk-mode Chromium, two polkit rules (one so `pcscd` authorizes the service
+  user, which has no interactive login session; one so it may reboot the Pi —
+  see `request_reboot()` above), and a Chromium flag drop-in to skip the
+  login-keyring prompt. It also installs `ffmpeg` and runs
+  `scripts/build-loop.sh`, because the long background loop is generated per
+  machine rather than tracked in git.
+  - **`config/decode-mode`** switches the kiosk between hardware and software
+    video decode. One word, read by `autostart/labwc-autostart` at every
+    Chromium launch (so a reboot applies it), written by
+    `scripts/set-decode.sh`, gitignored because it is a per-Pi
+    troubleshooting setting that `git pull` must not fight. Absent means
+    hardware. Software decode costs about a core but touches no V4L2 at all,
+    which is the point: both video failures this board has had came from that
+    stack.  The chosen mode is logged to `labtrack-chromium` on every launch,
+    since it is otherwise invisible when reading back a freeze. See README.md for the full hardware bring-up
   walkthrough and troubleshooting (polkit denial, labwc autostart quirks,
   Chromium binary naming, NetworkManager/keyring interaction) — these are
   Pi-specific footguns already solved there; consult it before re-deriving

@@ -25,8 +25,14 @@
       <!-- Looping background behind every slide. No "loop" attribute: main.js
            wraps back to the start early instead, because reaching end-of-stream
            permanently wedges the Pi's hardware decoder (see LOOP_TAIL_S).
-           It stays hidden until main.js confirms a file is configured. -->
-      <video class="media__bg" id="media-bg" autoplay muted playsinline></video>
+           It stays hidden until main.js confirms a file is configured.
+
+           data-video is chosen server-side (BACKGROUND_VIDEO_CANDIDATES in
+           app.py), not named in main.js, because which file exists depends on
+           whether scripts/build-loop.sh has run on this machine. Empty means
+           no background. -->
+      <video class="media__bg" id="media-bg" autoplay muted playsinline
+             data-video="{{ background_video }}"></video>
       <div class="media__scrim"></div>
       <!-- Panel header, deliberately a sibling of the slide rather than a
            child of it: inside .slide__body it moved with the layout (centred
@@ -67,6 +73,17 @@
       <button type="button" id="confirm-cancel" class="confirm__btn">Cancel</button>
       <button type="button" id="confirm-ok" class="confirm__btn confirm__btn--go">Confirm</button>
     </div>
+  </div>
+
+  <!-- Reboot notice. The board can reach a state only a reboot clears - a
+       wedged video decoder takes the display down while the page itself keeps
+       running - so the server schedules one and this says so first. Above
+       every other overlay in the stack: whatever else is on screen, the
+       screen going away shortly is the more important thing to say. -->
+  <div class="reboot" id="reboot">
+    <div class="reboot__title">Display fault</div>
+    <div class="reboot__count" id="reboot-count"></div>
+    <div class="reboot__hint">Restarting to recover. Check-ins resume automatically.</div>
   </div>
 
   <div class="toast" id="toast">

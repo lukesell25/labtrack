@@ -1,5 +1,6 @@
 import json
 import logging
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -12,7 +13,7 @@ import database as db
 import identity
 import webauth
 from cac_reader import get_reader_presence, start_cac_monitor, start_reader_watch
-from health import start_health_monitor, sample as health_sample
+from health import start_health_monitor, sample as health_sample, uptime_s
 
 # Deliberately no timestamp in the format: in production every line goes to
 # stderr, which systemd stamps and indexes itself, so a second timestamp is
@@ -24,6 +25,19 @@ log = logging.getLogger("labtrack")
 app = Flask(__name__)
 
 OBJECTIVES_PATH = Path(__file__).parent / "config" / "objectives.json"
+STATIC_MEDIA = Path(__file__).parent / "static" / "media"
+
+# Background video for the kiosk, in order of preference; the first one that
+# exists wins, and no match means no background (which costs nothing - see
+# has-bg in CLAUDE.md). Resolved here rather than hardcoded in main.js because
+# the two candidates are produced differently: background.mp4 is the short
+# master tracked in git, and background-long.mp4 is the ~900MB file that
+# scripts/build-loop.sh concatenates from it on the Pi. The long one is
+# strongly preferred - every wrap back to the start is a chance to hit the
+# bcm2835_codec stop_streaming oops that freezes the board, and it wraps 50x
+# less often. To use different footage, put it in static/media/ and name it
+# here; set this to () for no background at all.
+BACKGROUND_VIDEO_CANDIDATES = ("background-long.mp4", "background.mp4")
 
 # Last check-in/out event, shared between the CAC-reader thread and the
 # Flask request threads. The frontend polls /api/state and compares
@@ -113,6 +127,129 @@ def _handle_tap(edipi: str):
     _push_event(event["display_name"], event["action"], checkin_event_id=event["checkin_event_id"])
 
 
+def _background_video():
+    """Filename of the background video to serve, or "" if none is present."""
+    for name in BACKGROUND_VIDEO_CANDIDATES:
+        if (STATIC_MEDIA / name).is_file():
+            return name
+    return ""
+
+
+# --- unattended recovery ---------------------------------------------
+# Some failures leave the board dead in a way nothing on this end can undo.
+# The one we have actually seen: a wrap-around seek trips a race in the Pi's
+# bcm2835_codec stop_streaming, the kernel oopses in a workqueue, and tasks
+# start piling up in uninterruptible sleep until the compositor is one of
+# them and the screen stops updating. gunicorn keeps serving and the page
+# keeps polling throughout - only the picture is gone - so nothing here
+# errors and only a reboot clears it. See "Background video freezes" in
+# README.md for the trace.
+
+REBOOT_WARNING_S = 30
+
+# Nothing may reboot a Pi that only just came up. A condition that reasserts
+# itself every boot would otherwise cycle the board forever, and a kiosk
+# stuck in a reboot loop is far worse than one showing a flat background: the
+# board self-heals from the freeze, but nobody can check in during a loop.
+# The stall watchdog needs ~20s to fire, so anything inside this window is a
+# fault that survived the last reboot and will survive the next one too.
+REBOOT_MIN_UPTIME_S = 30 * 60
+
+# Absolute path for the same reason health.py resolves vcgencmd absolutely:
+# the unit file sets a venv-first PATH, and a bare name is unfindable from
+# the service even though it works in an interactive shell.
+SYSTEMCTL = "/usr/bin/systemctl"
+
+# Client-log keys that mean the display is unrecoverable. Deliberately a
+# small explicit set, not "any error": these arrive on /api/client-log, which
+# anything on the lab network holding the dashboard password can post to.
+REBOOT_ON_CLIENT_KEYS = {"video-stall"}
+
+_reboot_lock = threading.Lock()
+_reboot_state = {"at": None, "reason": None}
+
+
+_REBOOT_HELP = (
+    "is systemd/40-labtrack-reboot.rules installed in /etc/polkit-1/rules.d/? "
+    "scripts/setup.sh installs it; an install predating it needs the file "
+    "copied and polkit restarted."
+)
+
+
+def _reboot_failed(detail):
+    """
+    Give up on a scheduled reboot, loudly, and clear the countdown.
+
+    Clearing it matters as much as the log line: the kiosk derives its notice
+    from this state, so leaving it set would park the board under "restarting
+    in 0s" forever for a reboot that is never coming.
+    """
+    log.error("reboot failed (%s): %s", detail, _REBOOT_HELP)
+    with _reboot_lock:
+        _reboot_state.update(at=None, reason=None)
+
+
+def _do_reboot(reason):
+    log.warning("rebooting now: %s", reason)
+    try:
+        # --no-block for the same reason labtrack-reboot.service uses it: a
+        # blocking systemctl reboot waits on a job that has to stop this very
+        # service first, so the two would wait on each other.
+        proc = subprocess.run(
+            [SYSTEMCTL, "--no-block", "reboot"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        _reboot_failed(e)
+        return
+
+    # check=False on purpose: the likeliest failure by far is a polkit denial,
+    # and that *exits non-zero* rather than raising - so a bare check=False
+    # with no test here would swallow exactly the error worth reporting.
+    # systemctl writes the reason ("Access denied", "Interactive
+    # authentication required") to stderr, so pass it straight through.
+    if proc.returncode != 0:
+        _reboot_failed(
+            f"{SYSTEMCTL} exited {proc.returncode}: "
+            f"{(proc.stderr or '').strip() or 'no output'}"
+        )
+
+
+def request_reboot(reason, delay_s=REBOOT_WARNING_S):
+    """
+    Schedule a reboot, giving the kiosk delay_s seconds to say so on screen
+    first. Returns True if one was scheduled by this call.
+    """
+    up = uptime_s()
+    if up is not None and up < REBOOT_MIN_UPTIME_S:
+        log.warning(
+            "not rebooting for %s: only up %.0fs (need %ds). A fault this "
+            "early survives reboots, so cycling the board would not fix it.",
+            reason, up, REBOOT_MIN_UPTIME_S,
+        )
+        return False
+
+    with _reboot_lock:
+        if _reboot_state["at"] is not None:
+            return False
+        _reboot_state.update(at=time.monotonic() + delay_s, reason=reason)
+
+    log.warning("rebooting in %ds: %s", delay_s, reason)
+    timer = threading.Timer(delay_s, _do_reboot, args=(reason,))
+    timer.daemon = True
+    timer.start()
+    return True
+
+
+def _reboot_countdown():
+    """What /api/state tells the kiosk, or None when no reboot is pending."""
+    with _reboot_lock:
+        at, reason = _reboot_state["at"], _reboot_state["reason"]
+    if at is None:
+        return None
+    return {"in_s": max(0, round(at - time.monotonic())), "reason": reason}
+
+
 @app.before_request
 def _require_dashboard_password():
     """
@@ -139,7 +276,7 @@ def _require_dashboard_password():
 @app.route("/")
 def kiosk():
     """The always-on display: screensaver + toast overlay on check-in/out."""
-    return render_template("index.html")
+    return render_template("index.html", background_video=_background_video())
 
 
 @app.route("/dashboard")
@@ -173,6 +310,10 @@ def api_state():
             # second across the kiosk and every open dashboard, so it must
             # not talk to pcscd itself.
             "reader": get_reader_presence(),
+            # null except in the seconds between something deciding the board
+            # is unrecoverable and the reboot actually happening, so the
+            # kiosk can put a countdown on screen rather than blinking out.
+            "reboot": _reboot_countdown(),
         }
     )
 
@@ -326,6 +467,10 @@ def api_client_log():
     if _client_log_allowed():
         repeat = f" (x{count} since last report)" if isinstance(count, int) and count > 1 else ""
         log.warning("client %s: %s%s", key, detail, repeat)
+    # Reported before the reboot is requested, so the journal always carries
+    # the reason ahead of the reboot it caused.
+    if key in REBOOT_ON_CLIENT_KEYS:
+        request_reboot(f"client reported {key}: {detail}")
     return jsonify({"ok": True})
 
 

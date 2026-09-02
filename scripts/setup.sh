@@ -10,16 +10,22 @@ fi
 
 echo "==> Installing system packages (smart card + browser + python venv)"
 sudo apt update
+# ffmpeg is for scripts/build-loop.sh, which builds the long-playing
+# background video from the short master tracked in git (see below).
 sudo apt install -y \
   pcscd pcsc-tools opensc libpcsclite-dev swig \
   python3-venv python3-dev \
-  chromium-browser
+  chromium-browser ffmpeg
 
 echo "==> Enabling pcscd (smart card daemon)"
 sudo systemctl enable --now pcscd
 
-echo "==> Installing polkit rule so pcscd allows the service user (no interactive login session)"
+echo "==> Installing polkit rules for the service user (no interactive login session)"
+# pcscd: without this, pcsc-lite >= 2.0.1 rejects the service as a non-session
+# client. reboot: lets app.py recover the board from a wedged display, which
+# nothing in userspace can otherwise undo - see request_reboot() in app.py.
 sudo cp systemd/40-labtrack-pcscd.rules /etc/polkit-1/rules.d/40-labtrack-pcscd.rules
+sudo cp systemd/40-labtrack-reboot.rules /etc/polkit-1/rules.d/40-labtrack-reboot.rules
 sudo systemctl restart polkit
 
 echo "==> Creating Python virtual environment"
@@ -65,6 +71,18 @@ sudo cp systemd/labtrack-reboot.timer /etc/systemd/system/labtrack-reboot.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now labtrack-reboot.timer
 
+echo "==> Building the long-playing background video"
+# The kiosk loops its background by seeking back to the start, and each seek
+# is a chance to hit the bcm2835_codec stop_streaming bug that freezes the
+# display. Concatenating the 12s master into a 10-minute file makes that seek
+# happen 50x less often. Stream copy, so it is lossless and takes seconds.
+# Not in git: the result is ~900MB. Skipped rather than fatal - the board
+# still runs on the short master, just with a shorter mean time to freeze.
+if ! ./scripts/build-loop.sh 10; then
+  echo "    WARNING: could not build the long loop; the kiosk will fall back to"
+  echo "    the short background.mp4. Re-run scripts/build-loop.sh to retry."
+fi
+
 echo "==> Installing kiosk autostart (labwc - the default Wayland desktop on current Raspberry Pi OS)"
 mkdir -p ~/.config/labwc
 cp autostart/labwc-autostart ~/.config/labwc/autostart
@@ -89,6 +107,9 @@ echo "     cat config/dashboard.key    (generated on first start; blank username
 echo "     Replace it with a passphrase of your own if you prefer, then restart."
 echo "  4. Reboot: sudo reboot"
 echo "     The Pi should boot to desktop and Chromium should launch in kiosk mode automatically."
+echo ""
+echo "  If the background video misbehaves, fall back to software decode:"
+echo "    ./scripts/set-decode.sh software && sudo reboot"
 echo ""
 echo "  To watch a long unattended run:"
 echo "    sudo journalctl -u labtrack -t labtrack-chromium -f   # app + browser"

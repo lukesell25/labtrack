@@ -38,6 +38,24 @@ TEMP_WARN_C = 75.0
 # notice, because nothing errors on this end.
 KIOSK_SILENT_WARN_S = 120
 
+# How long a process must sit in uninterruptible sleep ("D" state) before it
+# counts as stuck rather than merely busy. Ordinary disk I/O passes through D
+# constantly, so a single reading means nothing; what does mean something is
+# the *same pid* still there minutes later, because a task blocked on a lock
+# that a dead kernel thread will never release does not come back.
+#
+# Measured in wall time rather than samples because sample() is also called
+# on demand by /api/health, and counting calls would let an extra poll push a
+# transient over the line.
+#
+# This is what the board's worst failure looks like from userspace. When the
+# bcm2835_codec stop_streaming race oopsed a kworker, tasks began piling up
+# behind it one at a time; load average climbed to exactly the core count and
+# stayed there, while the CPU stayed cold because nothing was actually
+# running. Every other probe in this module read perfectly normal for the
+# five hours the display was dead.
+DSTATE_STUCK_S = 300
+
 # Bits of vcgencmd's throttled word. The low four are "right now", the same
 # four shifted up by 16 are "has happened since boot". Undervoltage is the
 # single most common cause of a Pi that locks up or reboots for no visible
@@ -124,6 +142,51 @@ def _chromium_mem_mb():
             total += mb
             count += 1
     return (total if count else None), count
+
+
+# pid -> when it was first seen in D state (monotonic). Entries are dropped
+# as soon as a pid leaves D, so this stays the size of whatever is genuinely
+# blocked - normally empty.
+_dstate_since = {}
+
+
+def _dstate_procs():
+    """
+    (how many processes are in D state now, names of those stuck in it).
+
+    Scans every /proc/<pid>/stat once a minute - a few hundred small reads,
+    the same order of work as the Chromium memory scan above.
+    """
+    try:
+        pids = [name for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return None, []
+
+    now = time.monotonic()
+    current = {}
+    for pid in pids:
+        stat = _read(f"/proc/{pid}/stat")
+        if not stat:
+            continue
+        # Field layout is `pid (comm) state ...`, and comm is arbitrary - it
+        # can contain spaces and parentheses - so the state is located from
+        # the LAST ")" rather than by splitting the line.
+        _, _, rest = stat.partition("(")
+        comm, _, after = rest.rpartition(")")
+        fields = after.split()
+        if fields and fields[0] == "D":
+            current[pid] = comm
+
+    for pid in list(_dstate_since):
+        if pid not in current:
+            del _dstate_since[pid]
+
+    stuck = []
+    for pid, comm in current.items():
+        since = _dstate_since.setdefault(pid, now)
+        if now - since >= DSTATE_STUCK_S:
+            stuck.append(f"{comm}({pid})")
+    return len(current), sorted(stuck)
 
 
 # vcgencmd has to be found by absolute path, not by name. The systemd unit
@@ -231,6 +294,7 @@ def sample(kiosk_idle_s=None):
     temp = _temp_c()
     disk_free = _disk_free_mb()
     throttle_raw, throttle_flags = _throttled()
+    dstate_now, dstate_stuck = _dstate_procs()
     try:
         load1 = os.getloadavg()[0]
     except OSError:
@@ -245,6 +309,15 @@ def sample(kiosk_idle_s=None):
         concerns.append(f"cpu at {temp:.1f}C")
     if kiosk_idle_s is not None and kiosk_idle_s > KIOSK_SILENT_WARN_S:
         concerns.append(f"kiosk has not polled for {kiosk_idle_s:.0f}s")
+    if dstate_stuck:
+        # Truncated because a wedged driver can take a dozen processes down
+        # with it, and the point of this line is to be readable in a journal.
+        shown = ", ".join(dstate_stuck[:6])
+        more = f" (+{len(dstate_stuck) - 6} more)" if len(dstate_stuck) > 6 else ""
+        concerns.append(
+            f"{len(dstate_stuck)} process(es) stuck in uninterruptible sleep "
+            f"for over {DSTATE_STUCK_S}s: {shown}{more}"
+        )
 
     parts = [
         f"mem_avail={_fmt(mem_avail, 'M')}",
@@ -253,11 +326,16 @@ def sample(kiosk_idle_s=None):
         f"chromium_mem={_fmt(chromium_mb, 'M', '.1f')}",
         f"chromium_procs={chromium_procs}",
         f"load1={_fmt(load1, '', '.2f')}",
+        # Alongside load1 on purpose: these two together are what separate a
+        # Pi that is busy from a Pi that is stuck. Load counts D-state tasks,
+        # so a load pinned at the core count with a cold CPU and a non-zero
+        # dstate is a wedge, not work.
+        f"dstate={_fmt(dstate_now, '', 'd')}",
         f"temp={_fmt(temp, 'C', '.1f')}",
         f"disk_free={_fmt(disk_free, 'M')}",
         f"throttled={throttle_raw or '?'}",
         f"kiosk_idle={_fmt(kiosk_idle_s, 's')}",
-        f"uptime={_fmt(_uptime_s(), 's')}",
+        f"uptime={_fmt(uptime_s(), 's')}",
     ]
     message = "health " + " ".join(parts)
     if concerns:
@@ -265,7 +343,7 @@ def sample(kiosk_idle_s=None):
     return message, bool(concerns), concerns
 
 
-def _uptime_s():
+def uptime_s():
     text = _read("/proc/uptime")
     try:
         return float(text.split()[0])

@@ -1,0 +1,22 @@
+// Allow the labtrack service user to reboot the Pi.
+//
+// This is for one specific, unattended case: the board reaches a state that
+// only a reboot clears - a wedged video decoder takes the display down while
+// gunicorn keeps serving and the page keeps polling, so nothing on the
+// software side can recover it - and app.py's request_reboot() schedules one
+// after warning on screen. Without this rule login1 refuses, because the
+// service runs as `admin` rather than root and has no interactive session to
+// authenticate against.
+//
+// reboot-multiple-sessions is needed as well as reboot: the kiosk's desktop
+// session counts as another session, so plain `reboot` is not the action
+// logind checks once anyone is logged in.
+polkit.addRule(function(action, subject) {
+    if (
+        (action.id == "org.freedesktop.login1.reboot" ||
+         action.id == "org.freedesktop.login1.reboot-multiple-sessions") &&
+        subject.user == "admin"
+    ) {
+        return polkit.Result.YES;
+    }
+});

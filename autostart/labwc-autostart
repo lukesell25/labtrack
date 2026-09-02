@@ -17,6 +17,45 @@ while ! curl -s -o /dev/null http://localhost:5000; do
   sleep 1
 done
 
+# Hardware or software video decode, read fresh at every kiosk launch from
+# config/decode-mode (one word: "hardware" or "software"; missing or
+# unreadable means hardware, which is what the Pi wants).
+#
+# Software decode exists as an escape hatch, not a preference: it costs a lot
+# of CPU permanently, but it is the only way to run the background video
+# without touching the V4L2 stack at all. Both video failures this board has
+# ever had came from that stack - the end-of-stream drain wedge, and the
+# stop_streaming oops that freezes the whole display - and neither reproduces
+# under software decode, because there is no hardware queue to tear down.
+# Reach for it when the video misbehaves and you need the board up while you
+# work out why. See "Switching video decode" in README.md.
+#
+# The path is absolute because labwc runs this from ~/.config/labwc/autostart,
+# not from the project directory; it matches WorkingDirectory in
+# systemd/labtrack.service.
+LABTRACK_DIR=/home/admin/labtrack
+DECODE_MODE=hardware
+DECODE_FLAGS=
+
+if [ -r "$LABTRACK_DIR/config/decode-mode" ]; then
+  DECODE_MODE=$(tr -d '[:space:]' < "$LABTRACK_DIR/config/decode-mode")
+fi
+case "$DECODE_MODE" in
+  software)
+    DECODE_FLAGS=--disable-accelerated-video-decode
+    ;;
+  hardware|"")
+    DECODE_MODE=hardware
+    ;;
+  *)
+    logger -t labtrack-chromium "unknown decode mode '$DECODE_MODE' in config/decode-mode, using hardware"
+    DECODE_MODE=hardware
+    ;;
+esac
+# Logged every launch: which decode path was live is the first thing you want
+# to know when reading back a freeze, and it is otherwise invisible.
+logger -t labtrack-chromium "video decode: $DECODE_MODE"
+
 # --password-store=basic skips Chromium's OS-keyring integration for THIS
 # launch. /etc/chromium.d/99-labtrack-password-store (installed alongside
 # this file) applies the same flag to every launch of chromium, including
@@ -55,4 +94,5 @@ chromium \
   --enable-gpu-rasterization \
   --disable-background-networking \
   --disable-features=Translate \
+  $DECODE_FLAGS \
   http://localhost:5000 2>&1 | logger -t labtrack-chromium &

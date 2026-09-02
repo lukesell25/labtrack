@@ -679,6 +679,47 @@ body.kiosk.has-pointer .roster__card:hover {
   padding: 0.8rem 1.75rem;
 }
 
+/* ---- reboot notice ----------------------------------------------- */
+/* Top of the overlay stack (55 reading / 58 confirm / 60 toast): the display
+   is about to go away, which outranks anything else on screen. Flat fill and
+   no animation, same as the others - this sits on a panel whose compositor is
+   already in trouble, so it must not ask the GPU for anything. */
+.reboot {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  background: var(--graphite-900);
+  display: none;
+}
+
+.reboot.is-visible {
+  display: flex;
+}
+
+.reboot__title {
+  font-family: var(--mono);
+  font-size: 1.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.reboot__count {
+  font-size: 3.2rem;
+  font-weight: 700;
+}
+
+.reboot__hint {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  color: var(--text-low);
+}
+
 /* ---- dashboard --------------------------------------------------- */
 /* ---- overlays over the background video -------------------------- */
 /* With a video configured, the confirmation overlays dim it instead of
@@ -689,7 +730,8 @@ body.kiosk.has-pointer .roster__card:hover {
    while an overlay is actually up - 4s per tap, or 15s for a note prompt. */
 body.has-bg .toast,
 body.has-bg .confirm,
-body.has-bg .reading-overlay {
+body.has-bg .reading-overlay,
+body.has-bg .reboot {
   background: rgba(14, 17, 22, 0.72);
 }
 

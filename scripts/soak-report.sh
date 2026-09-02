@@ -73,6 +73,28 @@ rule "Undervoltage / throttling (a common cause of unexplained lockups)"
 journalctl -k --since "$SINCE" --no-pager 2>/dev/null \
   | grep -Ei 'voltage|throttl' | body
 
+rule "Kernel oopses and driver warnings"
+# A driver that dies in a workqueue takes its locks with it, and everything
+# that later needs one parks in uninterruptible sleep forever. The board then
+# freezes while the app keeps serving and every other probe here reads normal
+# - which is exactly how a bcm2835_codec oops went unnoticed for five hours.
+# Only the headline lines: a single oops is a hundred lines of register dump,
+# and the pointer into the journal is what is wanted here.
+# Case-sensitive on purpose: the kernel cases these consistently, and a
+# case-insensitive "BUG:" also matches innocent lines like "mmc_debug:0".
+# "blocked for more than" is the hung-task detector, which names the tasks
+# stuck in uninterruptible sleep directly when it is enabled.
+journalctl -k --since "$SINCE" --no-pager 2>/dev/null \
+  | grep -E 'Internal error|Oops|BUG: |WARNING: CPU|driver bug|Unable to handle|blocked for more than' \
+  | head -40 | body
+
+rule "Reboots the app asked for"
+# request_reboot() in app.py, i.e. the board recovering itself from something
+# only a reboot clears. More than one or two in a window is the interesting
+# case: it means whatever is wrong is coming straight back.
+journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
+  | grep -E 'rebooting (in [0-9]+s|now)|not rebooting' | body
+
 rule "App warnings and errors"
 journalctl -u "$UNIT" --since "$SINCE" -p warning --no-pager 2>/dev/null \
   | grep -v 'labtrack.health' | body
@@ -89,10 +111,15 @@ rule "Chromium complaints"
 journalctl -t "$CHROMIUM_TAG" --since "$SINCE" --no-pager 2>/dev/null \
   | grep -Ei 'error|fail|v4l2|decode|crash' | tail -40 | body
 
-rule "Memory trend"
+rule "Trend"
 # The heartbeat line is a flat key=value list, so first/last/min/max per
 # field is enough to show a leak: a steadily falling mem_avail or a rising
 # chromium_mem over a multi-day window is the shape to look for.
+#
+# load1 and dstate are here for a different shape. Load counts tasks in
+# uninterruptible sleep as well as running ones, so a load pinned at the core
+# count (4 on a Pi 4) with a cold CPU and a non-zero dstate is a wedge, not
+# work - nothing is running, things are stuck behind a dead kernel thread.
 journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
   | grep -F 'health mem_avail=' \
   | awk '
@@ -102,10 +129,11 @@ journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
         len   = RLENGTH - length(key) - 1;
         return substr(line, start, len) + 0;
       }
+      BEGIN { nkeys = split("mem_avail chromium_mem app_mem load1 dstate", keys, " ") }
       {
         n++;
-        for (i = 1; i <= 3; i++) {
-          key = (i == 1 ? "mem_avail" : (i == 2 ? "chromium_mem" : "app_mem"));
+        for (i = 1; i <= nkeys; i++) {
+          key = keys[i];
           v = val($0, key);
           if (v == "") continue;
           if (!(key in first)) { first[key] = v; min[key] = v; max[key] = v; }
@@ -117,11 +145,14 @@ journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
       END {
         if (!n) exit;
         printf "samples: %d (about %.1f hours at one per minute)\n", n, n / 60;
-        for (i = 1; i <= 3; i++) {
-          key = (i == 1 ? "mem_avail" : (i == 2 ? "chromium_mem" : "app_mem"));
+        for (i = 1; i <= nkeys; i++) {
+          key = keys[i];
           if (!(key in first)) continue;
-          printf "%-13s first %8.1fM   last %8.1fM   min %8.1fM   max %8.1fM   change %+.1fM\n",
-                 key, first[key], last[key], min[key], max[key], last[key] - first[key];
+          # load1 and dstate are counts, not megabytes.
+          unit = (key == "load1" || key == "dstate") ? "" : "M";
+          printf "%-13s first %8.1f%s   last %8.1f%s   min %8.1f%s   max %8.1f%s   change %+.1f\n",
+                 key, first[key], unit, last[key], unit, min[key], unit, max[key], unit,
+                 last[key] - first[key];
         }
       }' | body
 

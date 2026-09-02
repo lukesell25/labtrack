@@ -21,3 +21,8 @@ config/dashboard.key
 
 # Snapshots taken before "clear all events" on the dashboard.
 labtrack-*.bak
+
+# Hardware vs software video decode for the kiosk browser. Per-Pi and edited
+# in place by scripts/set-decode.sh, so tracking it would make `git pull`
+# fight with a local troubleshooting change. Absent means hardware.
+config/decode-mode
