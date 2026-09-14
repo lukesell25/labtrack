@@ -2,7 +2,8 @@
 
 A small Flask app for your Raspberry Pi that:
 - Identifies lab members by tapping their DoD CAC on a USB smart card reader (no PIN)
-- Logs check-in/check-out events to SQLite
+- Logs check-in/check-out events to SQLite, plus "away" for someone at work
+  but not in the lab (the server room, a lecture hall)
 - Shows a live status board / screensaver on the Pi's own screen
 - Serves a dashboard viewable from any other PC on the network
 
@@ -40,10 +41,17 @@ curl -X POST http://localhost:5000/api/manual-toggle \
 ```
 
 Each call toggles that member, so run it twice to exercise both the
-check-in toast and the checkout note prompt. Note that events written this
-way are flagged as manual and show a "No card" mark on the board - that is
-the real behaviour, not a dev-mode artifact, so it is not a pixel-perfect
-stand-in for a tap.
+check-in toast and the checkout note prompt. Add `"action"` (`in`, `away` or
+`out`) and, for away, `"location"` to record something specific rather than a
+toggle - `{"member_id": 1, "action": "away", "location": "Server room"}`
+puts them on the board as away. Note that events written this way are
+flagged as manual and show a "No card" mark on the board - that is the real
+behaviour, not a dev-mode artifact, so it is not a pixel-perfect stand-in
+for a tap.
+
+There is no way to simulate the *question* a tap asks (see "Stepping away"
+below) without a reader: that path starts in the CAC monitor thread. The
+same dialog opens from a click on the roster strip, minus the countdown.
 
 Then open `http://localhost:5000` (kiosk display) and
 `http://localhost:5000/dashboard` in a browser to see your changes.
@@ -62,6 +70,7 @@ labtrack/
   config/members.json       Hashed EDIPI -> name roster (scripts/add-member.py)
   config/roster.key         Secret salt for those hashes - back this up, never commit it
   config/objectives.json    Screensaver text content (edit any time)
+  config/locations.json     Preset "away" places for the leaving dialog (edit any time)
   config/decode-mode        hardware|software video decode (scripts/set-decode.sh)
   templates/                Kiosk + dashboard HTML
   static/                   CSS, JS, and a media/ folder for slide pictures
@@ -75,7 +84,7 @@ labtrack/
   scripts/setup.sh          Installs everything below in one go
   scripts/add-member.py     Adds a member without their EDIPI hitting disk
                             (--pending for one you don't have an EDIPI for yet)
-  scripts/add-event.py      Logs a check-in/out at a time you name
+  scripts/add-event.py      Logs a check-in/away/out at a time you name
   scripts/soak-report.sh    Summarises a long unattended run
   scripts/build-loop.sh     Builds the long-playing background video (run on the Pi)
   scripts/set-decode.sh     Switches the kiosk between hardware/software decode
@@ -601,6 +610,39 @@ proxy in front, note that it breaks the loopback exemption: every request
 would then appear to come from the Pi itself and skip the password entirely
 (see the comment in `webauth.py`).
 
+## Stepping away (still at work)
+
+A member has three states, not two: **in** the lab, **out** (gone home, at
+lunch), and **away** - at work but somewhere else, like the server room or
+a lecture hall. A typical day reads in → away (server room) → in → out
+(lunch) → in → away (lecture hall) → in → out. Away is still working time,
+so "Hours this week" on the dashboard runs from the check-in to the
+check-out straight through it; the board just says where the person went.
+
+**Tapping while in asks a question.** A tap from someone who is out (or
+away) simply checks them in - they are standing at the lab's reader. A tap
+from someone who is *in* means they are leaving, but not where to, so
+instead of writing anything the board asks: **Check out**, or one of the
+preset places under "Still at work, elsewhere" (**Server room**, **Lecture
+hall**, ...), or **Other...** to type one. Click one with the mouse. If
+nobody chooses within 20 seconds the server records a plain checkout - the
+same thing a tap used to mean - so walking off without answering still logs
+the tap, and it does so even if the kiosk browser has died.
+
+The preset places come from `config/locations.json`:
+
+```json
+{
+  "locations": ["Server room", "Lecture hall"]
+}
+```
+
+Edit the list any time; the kiosk re-reads it within a minute, no restart.
+Wherever they went is shown under the person's name on the board and in the
+Note column of the dashboard's activity log, in blue with a hollow ring so
+"away" is never mistaken for "in" from across the room. Clicking the name of
+someone who is away offers **Back in lab** or **Check out**.
+
 ## Checking in without a card
 
 Tapping a CAC is the normal path. When that isn't possible - the reader is
@@ -611,9 +653,12 @@ yet - a member can check themselves in or out from the kiosk itself:
    (an always-on board shouldn't have a cursor parked on it for a week), so
    it reappears as soon as the mouse does.
 2. Click your name in the roster strip along the bottom of the screen.
-3. The board asks "Check in?" / "Check out?" - click Confirm. The dialog
-   cancels itself after 20 seconds, and clicking anywhere outside the two
-   buttons cancels it too, so a stray click never logs anything by itself.
+3. The board asks. Someone who is out gets **Check in**; someone who is in
+   gets **Check out** and the "still at work, elsewhere" places (see
+   "Stepping away" above); someone away gets **Back in lab** or **Check
+   out**. Cancel is always there, the dialog cancels itself after 20
+   seconds, and clicking anywhere outside the buttons cancels it too, so a
+   stray click never logs anything by itself.
 
 From there it behaves exactly like a tap: the same confirmation, and the
 same optional "why are you out" note prompt on a checkout.
@@ -975,6 +1020,10 @@ accruing. That's unchanged by this timer; it's the same as any other restart.
        -H "Content-Type: application/json" \
        -d '{"member_id": 1}'
   ```
+  That toggles (in → out, out or away → in). To record something specific,
+  add `"action"` - `in`, `away` or `out` - and for away a `"location"`:
+  `'{"member_id": 1, "action": "away", "location": "Server room"}'`. An
+  action that changes nothing (`in` while already in) is refused with a 409.
   Either way the event is flagged as manual and shows a "No card" mark on
   the board and the dashboard until that person's next tap.
   (member IDs are assigned in the order they appear in `config/members.json`,
@@ -994,13 +1043,16 @@ accruing. That's unchanged by this timer; it's the same as any other restart.
   to tap) — `manual-toggle` above always stamps the current time, so use this
   instead when the time matters:
   ```bash
-  python3 scripts/add-event.py "Ada Vance" in  "2026-08-27 08:15"
-  python3 scripts/add-event.py "Ada Vance" out "2026-08-27 16:40" --note "left early"
+  python3 scripts/add-event.py "Ada Vance" in   "2026-08-27 08:15"
+  python3 scripts/add-event.py "Ada Vance" away "2026-08-27 10:00" --note "Server room"
+  python3 scripts/add-event.py "Ada Vance" in   "2026-08-27 11:30"
+  python3 scripts/add-event.py "Ada Vance" out  "2026-08-27 16:40" --note "left early"
   ```
   It takes a name rather than an id (`--list` prints the roster), previews the
   event against the ones either side of it, and warns before writing if the
   result would break the in/out pairing the hours report depends on. Add both
-  halves of a shift: a lone `in` counts as time in the lab up to now. No
+  halves of a shift: a lone `in` (or `away`) counts as time at work up to now.
+  `--note` is the checkout comment for `out` and the location for `away`. No
   restart needed — the kiosk and dashboard pick it up on their next poll.
 - **Database** lives at `labtrack.db` in the project folder (plain SQLite —
   `sqlite3 labtrack.db` to poke at it directly if needed).

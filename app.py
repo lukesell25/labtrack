@@ -25,6 +25,9 @@ log = logging.getLogger("labtrack")
 app = Flask(__name__)
 
 OBJECTIVES_PATH = Path(__file__).parent / "config" / "objectives.json"
+# Where an 'away' member can say they went. Preset buttons on the kiosk, so
+# the choice works with a mouse and no keyboard; "Other" falls back to typing.
+LOCATIONS_PATH = Path(__file__).parent / "config" / "locations.json"
 STATIC_MEDIA = Path(__file__).parent / "static" / "media"
 
 # Background video for the kiosk, in order of preference; the first one that
@@ -58,6 +61,17 @@ _reader_status = {"reading": False}
 # must not be able to mask a dead kiosk.
 _kiosk_status = {"last_poll": None}
 
+# A tap by someone who is *in* is ambiguous - are they leaving for the day,
+# or for the server room? - so it is not written until they say. This holds
+# the one unanswered tap: the kiosk sees it on /api/state, puts the question
+# on screen, and answers through /api/tap-choice. If nobody answers within
+# TAP_CHOICE_TIMEOUT_S the server records a checkout itself, which is what a
+# tap meant before there was a question to ask; the deadline lives here, not
+# in the page, so a tap is recorded even if the kiosk browser is dead.
+# `id` is 0 when nothing is pending. Guarded by _state_lock like the rest.
+TAP_CHOICE_TIMEOUT_S = 20
+_pending_tap = {"id": 0, "member_id": None, "display_name": None, "deadline": 0.0}
+
 UNRECOGNIZED_MESSAGES = {
     "unreadable": "Could not read card",
     "no_edipi": "Card not recognized",
@@ -70,7 +84,8 @@ def _set_reading(active: bool):
         _reader_status["reading"] = active
 
 
-def _push_event(display_name, action, message=None, checkin_event_id=None, manual=False):
+def _push_event(display_name, action, message=None, checkin_event_id=None, manual=False,
+                previous=None, location=None):
     """
     Publishes an event for the kiosk to pick up on its next /api/state poll.
     Returns a snapshot of what it published, which is what /api/manual-toggle
@@ -82,6 +97,11 @@ def _push_event(display_name, action, message=None, checkin_event_id=None, manua
         _last_event["display_name"] = display_name
         _last_event["action"] = action
         _last_event["timestamp"] = datetime.now().isoformat(timespec="seconds")
+        # What the event replaced and, for 'away', where they went: the toast
+        # reads "Back in lab" rather than "Checked in" off the first, and
+        # names the place off the second.
+        _last_event["previous"] = previous
+        _last_event["location"] = location
         if message:
             _last_event["message"] = message
         else:
@@ -121,10 +141,146 @@ def _handle_tap(edipi: str):
         _push_event(None, "error", "Card not recognized")
         return
 
-    event = db.toggle_checkin(member["id"])
+    # A tap by someone who is in means they are leaving - but not whether for
+    # the day or for the server room, so ask rather than guess. Everyone else
+    # is standing at the lab's reader, which answers the question by itself:
+    # they are in the lab.
+    if db.current_status(member["id"]) == "in":
+        _set_reading(False)
+        _open_tap_choice(member)
+        return
+
+    event = db.record_event(member["id"], "in")
     log.info("%s checked %s at %s", event["display_name"], event["action"], event["timestamp"])
     _set_reading(False)
-    _push_event(event["display_name"], event["action"], checkin_event_id=event["checkin_event_id"])
+    _push_event(
+        event["display_name"],
+        event["action"],
+        checkin_event_id=event["checkin_event_id"],
+        manual=False,
+        previous=event["previous"],
+        location=event["location"],
+    )
+
+
+def _describe(event):
+    """One journal line's worth of an event: "checked in", "away (server room)"."""
+    if event["action"] == "away":
+        where = f" ({event['location']})" if event["location"] else ""
+        return f"away{where}"
+    return f"checked {event['action']}"
+
+
+# --- the tap question --------------------------------------------------
+
+def _open_tap_choice(member):
+    """
+    Park a tap from a member who is in until the kiosk says what it meant.
+    Any earlier unanswered tap is a different person who walked off without
+    choosing: it gets its default (a checkout) now rather than later, so there
+    is only ever one question on the board. The same person tapping again
+    just restarts their clock.
+    """
+    with _state_lock:
+        if _pending_tap["id"] and _pending_tap["member_id"] == member["id"]:
+            _pending_tap["deadline"] = time.monotonic() + TAP_CHOICE_TIMEOUT_S
+            tap_id = _pending_tap["id"]
+        else:
+            tap_id = None
+    if tap_id is not None:
+        _arm_tap_timeout(tap_id)
+        return
+
+    _resolve_tap(None, "out", timed_out=True)   # whoever was pending, if anyone
+
+    with _state_lock:
+        _pending_tap["id"] += 1
+        tap_id = _pending_tap["id"]
+        _pending_tap.update(
+            member_id=member["id"],
+            display_name=member["display_name"],
+            deadline=time.monotonic() + TAP_CHOICE_TIMEOUT_S,
+        )
+    log.info("%s tapped while in - asking where to", member["display_name"])
+    _arm_tap_timeout(tap_id)
+
+
+def _arm_tap_timeout(tap_id):
+    # A stale timer is harmless: _resolve_tap() checks the id and the
+    # deadline, so a re-tap that pushed the deadline out just makes the first
+    # timer a no-op and the second one the real one.
+    timer = threading.Timer(TAP_CHOICE_TIMEOUT_S, _resolve_tap, args=(tap_id, "out"),
+                            kwargs={"timed_out": True})
+    timer.daemon = True
+    timer.start()
+
+
+def _take_pending_tap(tap_id=None, member_id=None):
+    """
+    Claim the pending tap and clear the slot, or None if there isn't one (or
+    it isn't the one asked for, by id or by member). Atomic, so a choice and
+    a timeout arriving together resolve it exactly once.
+    """
+    with _state_lock:
+        if not _pending_tap["id"]:
+            return None
+        if tap_id is not None and _pending_tap["id"] != tap_id:
+            return None
+        if member_id is not None and _pending_tap["member_id"] != member_id:
+            return None
+        taken = dict(_pending_tap)
+        _pending_tap.update(id=0, member_id=None, display_name=None, deadline=0.0)
+        return taken
+
+
+def _resolve_tap(tap_id, action, location=None, timed_out=False):
+    """
+    Write the event a parked tap turns out to have meant, and publish it.
+    Returns the published event, or None if there was nothing to resolve.
+    With timed_out the caller is a timer or a superseding tap, and only a tap
+    whose deadline has actually passed (or no id at all) is taken - a timer
+    from before a re-tap must not fire early.
+    """
+    if timed_out and tap_id is not None:
+        with _state_lock:
+            if _pending_tap["id"] != tap_id or time.monotonic() < _pending_tap["deadline"]:
+                return None
+    taken = _take_pending_tap(tap_id)
+    if taken is None:
+        return None
+    try:
+        event = db.record_event(taken["member_id"], action, location=location)
+    except ValueError as e:
+        # Their status changed under the question (a manual toggle from the
+        # dashboard, say) and the answer no longer applies. Nothing to write.
+        log.info("dropping tap choice for %s: %s", taken["display_name"], e)
+        return None
+    log.info(
+        "%s %s at %s%s",
+        event["display_name"], _describe(event), event["timestamp"],
+        " (no choice made - recorded a checkout)" if timed_out else "",
+    )
+    return _push_event(
+        event["display_name"],
+        event["action"],
+        checkin_event_id=event["checkin_event_id"],
+        manual=False,
+        previous=event["previous"],
+        location=event["location"],
+    )
+
+
+def _pending_tap_view():
+    """What /api/state tells the kiosk, or None when no tap is waiting."""
+    with _state_lock:
+        if not _pending_tap["id"]:
+            return None
+        return {
+            "id": _pending_tap["id"],
+            "member_id": _pending_tap["member_id"],
+            "display_name": _pending_tap["display_name"],
+            "expires_in_s": max(0, round(_pending_tap["deadline"] - time.monotonic())),
+        }
 
 
 def _background_video():
@@ -310,6 +466,11 @@ def api_state():
             # second across the kiosk and every open dashboard, so it must
             # not talk to pcscd itself.
             "reader": get_reader_presence(),
+            # A tap waiting on "leaving, or stepping away?" - the kiosk puts
+            # the question up while this is non-null and takes it down when
+            # it isn't, so the board's dialog follows the server's state
+            # rather than its own memory of it.
+            "pending_tap": _pending_tap_view(),
             # null except in the seconds between something deciding the board
             # is unrecoverable and the reboot actually happening, so the
             # kiosk can put a countdown on screen rather than blinking out.
@@ -322,6 +483,43 @@ def api_state():
 def api_objectives():
     data = json.loads(OBJECTIVES_PATH.read_text())
     return jsonify(data)
+
+
+@app.route("/api/locations")
+def api_locations():
+    """Preset away locations for the kiosk's buttons; [] when unconfigured."""
+    try:
+        data = json.loads(LOCATIONS_PATH.read_text())
+    except FileNotFoundError:
+        data = {}
+    names = [str(x).strip() for x in data.get("locations", []) if str(x).strip()]
+    return jsonify({"locations": names})
+
+
+@app.route("/api/tap-choice", methods=["POST"])
+def api_tap_choice():
+    """
+    The kiosk's answer to a parked tap: {"tap_id", "action": "away"|"out",
+    "location"?}. The id must match the tap currently pending, so an answer
+    to a question that has already timed out (or been superseded by someone
+    else's tap) writes nothing - the checkout the timeout recorded stands,
+    and a 409 tells the page so. The event is not flagged manual: a card was
+    read, this is just the second half of the same tap.
+    """
+    payload = request.json or {}
+    action = payload.get("action")
+    if action not in ("away", "out"):
+        return jsonify({"error": 'action must be "away" or "out"'}), 400
+    location = payload.get("location")
+    location = location.strip()[:80] if isinstance(location, str) else None
+    try:
+        tap_id = int(payload.get("tap_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "tap_id required"}), 400
+    pushed = _resolve_tap(tap_id, action, location=location)
+    if pushed is None:
+        return jsonify({"error": "no such pending tap"}), 409
+    return jsonify(pushed)
 
 
 @app.route("/api/events")
@@ -386,10 +584,17 @@ def api_weekly_hours():
 @app.route("/api/manual-toggle", methods=["POST"])
 def api_manual_toggle():
     """
-    Toggle a member's status without a card tap. Three callers: the kiosk's
-    click-a-name flow (tapping the roster card, then confirming), the
+    Record an event for a member without a card tap. Three callers: the
+    kiosk's click-a-name flow (tapping the roster card, then choosing), the
     dashboard/curl fallback for when the reader is down, and dev machines
     with no reader at all.
+
+    {"member_id": 1} alone toggles - in -> out, out or away -> in - which is
+    what the dev loop and the curl fallback want. Add "action" ("in", "away"
+    or "out") to say exactly what to record, and "location" with "away" to say
+    where; that is what the kiosk dialog posts. An action that changes
+    nothing ("in" while already in) is a 409, since it would only unpair the
+    hours report.
 
     Every event written here is flagged manual, because none of them saw a
     card - the board and the log say so beside the person's name so an
@@ -398,27 +603,47 @@ def api_manual_toggle():
     The response is the event exactly as /api/state would report it, id
     included. The kiosk still re-polls rather than toasting from this reply
     (one path to the screen for every event, whatever caused it - see
-    submitConfirm() in main.js); it's here for curl and for anything that
+    submitChoice() in main.js); it's here for curl and for anything that
     wants to know what the toggle actually did.
     """
-    member_id = (request.json or {}).get("member_id")
+    payload = request.json or {}
+    member_id = payload.get("member_id")
     if member_id is None:
         return jsonify({"error": "member_id required"}), 400
+    action = payload.get("action")
+    if action is not None and action not in db.ACTIONS:
+        return jsonify({"error": 'action must be "in", "away" or "out"'}), 400
+    location = payload.get("location")
+    location = location.strip()[:80] if isinstance(location, str) else None
     try:
-        event = db.toggle_checkin(int(member_id), manual=True)
-    except (TypeError, ValueError):
+        member_id = int(member_id)
+        # If a tap of theirs is waiting on the question, this is the answer:
+        # claim it before writing, so a timeout can't land in between and
+        # record a checkout on top.
+        _take_pending_tap(member_id=member_id)
+        if action is None:
+            event = db.toggle_checkin(member_id, manual=True)
+        else:
+            event = db.record_event(member_id, action, location=location, manual=True)
+    except (TypeError, ValueError) as e:
+        if action is not None and str(e).startswith("Already"):
+            # The page that posted this is showing a stale status - somebody
+            # tapped in between. Its next poll will straighten it out.
+            return jsonify({"error": str(e).lower()}), 409
         # An unknown or non-numeric member_id: a stale kiosk page holding ids
         # from before a roster change, not a server fault, so don't 500 it.
         return jsonify({"error": "unknown member_id"}), 400
     log.info(
-        "%s checked %s at %s (no card)",
-        event["display_name"], event["action"], event["timestamp"],
+        "%s %s at %s (no card)",
+        event["display_name"], _describe(event), event["timestamp"],
     )
     pushed = _push_event(
         event["display_name"],
         event["action"],
         checkin_event_id=event["checkin_event_id"],
         manual=True,
+        previous=event["previous"],
+        location=event["location"],
     )
     return jsonify(pushed)
 

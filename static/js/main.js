@@ -116,15 +116,24 @@ function renderClock() {
 setInterval(renderClock, 1000);
 renderClock();
 
+// What the status line says for each state. Matches dashboard.js.
+const STATUS_LABELS = { in: "In lab", away: "Away", out: "Out" };
+
 // The third line of a roster card, when there is one. Both things that can
 // appear there share one line rather than taking one each: the card's height
 // is pinned to three lines (see .kiosk .roster__card in style.css), and a
-// manual checkout can carry a typed note as well as the no-card mark.
+// manual checkout can carry a typed note as well as the no-card mark. The
+// note is a checkout comment or, for someone away, where they went - the
+// server sends whichever applies as `note`.
 function rosterNote(m) {
   const parts = [];
   if (m.manual) parts.push('<span class="roster__nocard">No card</span>');
   if (m.note) parts.push(escapeHtml(m.note));
   return parts.length ? `<div class="roster__note">${parts.join(" · ")}</div>` : "";
+}
+
+function statusClass(status) {
+  return status === "in" ? "is-in" : status === "away" ? "is-away" : "";
 }
 
 let lastRosterJson = "";
@@ -148,12 +157,12 @@ function renderRoster(roster) {
   // rather than reattached per card.
   const el = document.getElementById("roster");
   el.innerHTML = roster.map(m => `
-    <button type="button" class="roster__card ${m.status === 'in' ? 'is-in' : ''}"
-            data-member-id="${m.id}">
+    <button type="button" class="roster__card ${statusClass(m.status)}"
+            data-member-id="${m.id}" data-status="${escapeHtml(m.status)}">
       <div class="roster__ring"></div>
       <div class="roster__meta">
         <div class="roster__name">${escapeHtml(m.display_name)}</div>
-        <div class="roster__status">${m.status === 'in' ? 'In lab' : 'Out'}${m.since ? ' · ' + fmtTime(m.since) : ''}</div>
+        <div class="roster__status">${STATUS_LABELS[m.status] || escapeHtml(m.status)}${m.since ? ' · ' + fmtTime(m.since) : ''}</div>
         ${rosterNote(m)}
       </div>
     </button>
@@ -183,15 +192,20 @@ function hideNotePrompt() {
   clearTimeout(showToast._noteTimeout);
 }
 
+const ACTION_LABELS = { in: "Checked in", away: "Stepped away", out: "Checked out" };
+
 function showToast(event) {
   const toast = document.getElementById("toast");
-  toast.classList.remove("is-out", "is-error");
+  toast.classList.remove("is-out", "is-away", "is-error");
   clearTimeout(showToast._t);
   hideNotePrompt();
   // Something happened - a card tap, or this page's own click-to-toggle.
-  // Either way a half-answered confirmation dialog is now about the wrong
-  // moment, so it goes rather than reappearing under the toast.
-  closeConfirm();
+  // Either way a half-answered click dialog is now about the wrong moment,
+  // so it goes rather than reappearing under the toast. A *tap's* question
+  // is different: that one follows the server's pending_tap (see
+  // syncTapChoice), which takes it down itself once the tap is resolved,
+  // and an unrelated event landing meanwhile shouldn't dismiss it.
+  if (dialog && dialog.mode === "click") closeConfirm();
 
   const hint = document.getElementById("toast-hint");
 
@@ -207,8 +221,11 @@ function showToast(event) {
   }
 
   document.getElementById("toast-name").textContent = event.display_name;
-  document.getElementById("toast-action").textContent =
-    event.action === "in" ? "Checked in" : "Checked out";
+  let actionText = ACTION_LABELS[event.action] || event.action;
+  if (event.action === "in" && event.previous === "away") actionText = "Back in lab";
+  if (event.action === "away" && event.location) actionText = `Away · ${event.location}`;
+  document.getElementById("toast-action").textContent = actionText;
+  toast.classList.toggle("is-away", event.action === "away");
   document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
   // "You may remove your card now" is the wrong thing to say to someone who
   // just clicked their own name, and the mark it leaves on the board is worth
@@ -284,40 +301,124 @@ function showToast(event) {
   }
 }
 
-// --- click to check in/out -------------------------------------------
-// The no-card path: click your name on the roster strip, confirm, done. It
-// exists for a reader that's down, a card left at home, and the stretch
-// before the reader is even installed - so it has to work with a mouse and
-// nothing else, hence a two-button dialog rather than anything typed.
+// --- the leaving / check-in dialog -------------------------------------
+// One dialog, two ways in.
 //
-// It asks first on purpose. The strip is six large targets along the bottom
-// of a screen that sits in the open all day; without a confirmation step a
-// single stray click silently checks somebody in or out, and the only trace
-// is a line in an append-only log. Every event this writes is flagged
-// manual server-side, and the board says "No card" beside that person's
-// name until their next tap - an unverified entry should never be
-// indistinguishable from a card read.
+// Click: your name on the roster strip, for the no-card path - a reader
+// that's down, a card left at home, the stretch before the reader is even
+// installed - so it has to work with a mouse and nothing else, hence buttons
+// rather than anything typed. It asks first on purpose: the strip is six
+// large targets along the bottom of a screen that sits in the open all day,
+// and without a confirmation step a single stray click silently logs
+// somebody in or out with only a line in an append-only log to show for it.
+// Every event this writes is flagged manual server-side, and the board says
+// "No card" beside that person's name until their next tap.
+//
+// Tap: a card read from someone who is already in. That tap means "leaving"
+// but not where to - home, or the server room - so the server parks it as
+// pending_tap on /api/state instead of writing anything, and this dialog is
+// the question. The server owns the clock: with no answer in
+// TAP_CHOICE_TIMEOUT_S it records a checkout itself, so the tap is logged
+// even if this page is dead. The dialog therefore follows the server's state
+// (syncTapChoice) rather than its own timer, and offers no Cancel - the card
+// was read; the only choices are what it meant.
+//
+// Leaving offers "Check out" plus a button per preset in
+// config/locations.json ("Server room", ...) and an "Other..." that reveals a
+// text box, so the common cases are one click and no keyboard.
 
-const CONFIRM_TIMEOUT_MS = 20000;   // an abandoned dialog must not sit on the board
+const CONFIRM_TIMEOUT_MS = 20000;   // an abandoned click dialog must not sit on the board
 
 const confirmEl = document.getElementById("confirm");
 const confirmNameEl = document.getElementById("confirm-name");
 const confirmActionEl = document.getElementById("confirm-action");
-const confirmOkBtn = document.getElementById("confirm-ok");
+const confirmHintEl = document.getElementById("confirm-hint");
 const confirmCancelBtn = document.getElementById("confirm-cancel");
+const confirmInBtn = document.getElementById("confirm-in");
+const confirmOutBtn = document.getElementById("confirm-out");
+const confirmAwayEl = document.getElementById("confirm-away");
+const confirmLocationsEl = document.getElementById("confirm-locations");
+const confirmOtherForm = document.getElementById("confirm-other");
+const confirmOtherInput = document.getElementById("confirm-other-input");
 
-// Which member the open dialog is about; null when it's closed, which is
-// also what makes a second Confirm click (or a timeout landing on an
+// What the open dialog is about, or null when closed - which is also what
+// makes a second click on a button (or a timeout landing on an
 // already-submitted dialog) a no-op.
-let confirmMemberId = null;
+//   { mode: "click", memberId, status }         status: in | away | out
+//   { mode: "tap",   memberId, tapId }          always someone who is in
+let dialog = null;
+
+// Preset away locations, from /api/locations (config/locations.json).
+let locations = [];
 
 function closeConfirm() {
   clearTimeout(closeConfirm._t);
-  if (confirmMemberId === null) return;
-  confirmMemberId = null;
+  if (dialog === null) return;
+  dialog = null;
   confirmEl.classList.remove("is-visible");
   document.body.classList.remove("is-confirm");
   syncOverlayState();
+}
+
+// Rebuilt each time a leaving dialog opens rather than kept in sync with the
+// 60s locations reload: it is a handful of buttons, built at most a few times
+// a day. Buttons carry an index, not the name, so a name with a quote in it
+// can't break out of the attribute.
+function renderLocationButtons() {
+  confirmLocationsEl.innerHTML = locations.map((name, i) =>
+    `<button type="button" class="confirm__btn confirm__btn--away" data-location="${i}">` +
+    `${escapeHtml(name)}</button>`
+  ).join("") +
+  `<button type="button" class="confirm__btn" data-other>Other…</button>`;
+}
+
+function openDialog(next) {
+  clearTimeout(closeConfirm._t);
+  dialog = next;
+  const status = next.mode === "tap" ? "in" : next.status;
+  const leaving = status !== "out";
+
+  confirmNameEl.textContent = next.name;
+  confirmActionEl.textContent =
+    status === "in" ? "Leaving the lab?" : status === "away" ? "Back in the lab?" : "Check in?";
+  confirmEl.classList.toggle("is-out", status === "in");
+  confirmEl.classList.toggle("is-away", status === "away");
+
+  // Which buttons apply. Out: [Cancel] [Check in]. In: [Cancel] [Check out]
+  // + the away row. Away: [Cancel] [Back in lab] [Check out]. A tap has no
+  // Cancel, and only ever comes from someone who is in.
+  confirmCancelBtn.hidden = next.mode === "tap";
+  confirmInBtn.hidden = status === "in";
+  confirmInBtn.textContent = status === "away" ? "Back in lab" : "Check in";
+  confirmOutBtn.hidden = status === "out";
+  confirmAwayEl.hidden = status !== "in";
+  if (status === "in") {
+    renderLocationButtons();
+    confirmOtherForm.hidden = true;
+    confirmOtherInput.value = "";
+  }
+
+  confirmHintEl.textContent = next.mode === "tap"
+    ? `No choice within ${next.expiresInS}s records a checkout.`
+    : "No card will be read — the board will show this as a manual entry.";
+
+  confirmEl.classList.add("is-visible");
+  document.body.classList.add("is-confirm");
+  syncOverlayState();
+
+  if (next.mode === "tap") {
+    // Check out is what happens anyway if nothing is chosen, so it is the
+    // safe place for a stray Enter. The server's deadline is the real one;
+    // the local timer is only a backstop against the poll that would
+    // normally take this down having died with the backend.
+    confirmOutBtn.focus();
+    closeConfirm._t = setTimeout(closeConfirm, (next.expiresInS + 10) * 1000);
+  } else {
+    // Cancel takes focus, not an action: if a keyboard is ever plugged in, a
+    // stray Enter should land on the harmless button.
+    confirmCancelBtn.focus();
+    closeConfirm._t = setTimeout(closeConfirm, CONFIRM_TIMEOUT_MS);
+  }
 }
 
 // Name and current status come off the card that was clicked rather than a
@@ -327,37 +428,61 @@ function closeConfirm() {
 function openConfirm(card) {
   const memberId = Number(card.dataset.memberId);
   if (!memberId) return;
-  const goingIn = !card.classList.contains("is-in");
-
-  confirmMemberId = memberId;
-  confirmNameEl.textContent = card.querySelector(".roster__name").textContent;
-  confirmActionEl.textContent = goingIn ? "Check in?" : "Check out?";
-  confirmOkBtn.textContent = goingIn ? "Check in" : "Check out";
-  confirmEl.classList.toggle("is-out", !goingIn);
-  confirmEl.classList.add("is-visible");
-  document.body.classList.add("is-confirm");
-  syncOverlayState();
-
-  // Cancel takes focus, not Confirm: if a keyboard is ever plugged in, a
-  // stray Enter should land on the harmless button.
-  confirmCancelBtn.focus();
-  closeConfirm._t = setTimeout(closeConfirm, CONFIRM_TIMEOUT_MS);
+  openDialog({
+    mode: "click",
+    memberId,
+    status: card.dataset.status,
+    name: card.querySelector(".roster__name").textContent,
+  });
 }
 
-async function submitConfirm() {
-  const memberId = confirmMemberId;
-  if (memberId === null) return;
-  closeConfirm();       // also clears the id, so a double click can't post twice
+// The server has a tap waiting on this question (or no longer does). The
+// dialog mirrors that: a new pending id opens it, null closes it. Deriving
+// it from the poll rather than from local events means a page reload
+// mid-question comes back showing the question, and the server's own
+// timeout (which records a checkout) takes it down without any help.
+function syncTapChoice(pending) {
+  if (!pending) {
+    if (dialog && dialog.mode === "tap") closeConfirm();
+    return;
+  }
+  if (dialog && dialog.mode === "tap" && dialog.tapId === pending.id) return;
+  // The person is standing at the reader: their question outranks a toast
+  // still on screen (someone else's note prompt included) and any click
+  // dialog that was open.
+  clearTimeout(showToast._t);
+  hideNotePrompt();
+  setToastVisible(false);
+  openDialog({
+    mode: "tap",
+    tapId: pending.id,
+    memberId: pending.member_id,
+    name: pending.display_name,
+    expiresInS: pending.expires_in_s,
+  });
+}
 
+async function submitChoice(action, location) {
+  const d = dialog;
+  if (d === null) return;
+  closeConfirm();       // also clears the state, so a double click can't post twice
+
+  const url = d.mode === "tap" ? "/api/tap-choice" : "/api/manual-toggle";
+  const body = d.mode === "tap"
+    ? { tap_id: d.tapId, action, location }
+    : { member_id: d.memberId, action, location };
   try {
-    const res = await fetch("/api/manual-toggle", {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ member_id: memberId }),
+      body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // 409: the answer no longer applies - the tap already timed out to a
+    // checkout, or a click was made against a status that changed under
+    // it. Whatever the board shows next is the truth; nothing to report.
+    if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
   } catch (e) {
-    report("manual-toggle-failed", e);
+    report("choice-failed", e);
     showToast({
       action: "error",
       message: "Could not record that",
@@ -380,21 +505,50 @@ document.getElementById("roster").addEventListener("click", (e) => {
   if (card) openConfirm(card);
 });
 
-confirmOkBtn.onclick = submitConfirm;
-confirmCancelBtn.onclick = closeConfirm;
-
-// Clicking the backdrop is a cancel: the dialog covers the screen, so
-// "somewhere else" is the instinctive way out of one opened by mistake.
+// One handler for every button in the dialog, since the location row is
+// rebuilt on open. Clicking the backdrop is a cancel for a click dialog: it
+// covers the screen, so "somewhere else" is the instinctive way out of one
+// opened by mistake. Not for a tap - that has no cancel.
 confirmEl.addEventListener("click", (e) => {
-  if (e.target === confirmEl) closeConfirm();
+  const btn = e.target.closest("button");
+  if (!btn) {
+    if (e.target === confirmEl && dialog && dialog.mode === "click") closeConfirm();
+    return;
+  }
+  if (btn === confirmCancelBtn) closeConfirm();
+  else if (btn.dataset.action) submitChoice(btn.dataset.action, null);
+  else if (btn.dataset.location !== undefined) submitChoice("away", locations[Number(btn.dataset.location)]);
+  else if (btn.hasAttribute("data-other")) {
+    confirmOtherForm.hidden = false;
+    confirmOtherInput.focus();
+  }
+});
+
+confirmOtherForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  // Empty is allowed - "away, somewhere" is still true, and with no keyboard
+  // on the kiosk it may be all that can be said.
+  submitChoice("away", confirmOtherInput.value.trim() || null);
 });
 
 // Keyboard is a courtesy here (the kiosk has no keyboard), and matches the
-// note prompt's arrow-key handling. Enter on a focused button is native.
+// note prompt's arrow-key handling: left/right step through whichever
+// buttons are showing. Enter on a focused button is native, and Enter in the
+// text box submits its form.
 confirmEl.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") { e.preventDefault(); closeConfirm(); }
-  else if (e.key === "ArrowLeft") { e.preventDefault(); confirmCancelBtn.focus(); }
-  else if (e.key === "ArrowRight") { e.preventDefault(); confirmOkBtn.focus(); }
+  if (e.key === "Escape") {
+    if (dialog && dialog.mode === "click") { e.preventDefault(); closeConfirm(); }
+    return;
+  }
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (e.target === confirmOtherInput) return;
+  e.preventDefault();
+  const buttons = [...confirmEl.querySelectorAll("button")]
+    .filter((b) => !b.hidden && !b.closest("[hidden]"));
+  if (!buttons.length) return;
+  const at = buttons.indexOf(document.activeElement);
+  const step = e.key === "ArrowRight" ? 1 : -1;
+  buttons[(at + step + buttons.length) % buttons.length].focus();
 });
 
 // --- pointer visibility ----------------------------------------------
@@ -506,7 +660,7 @@ function renderReboot(reboot) {
   rebootTimer = setInterval(tickReboot, 1000);
 }
 
-// Polls can overlap: submitConfirm() fires one the instant a click has been
+// Polls can overlap: submitChoice() fires one the instant a click has been
 // recorded instead of waiting out the interval, so two are briefly in flight.
 // If the older reply lands second it carries the pre-click state - repainting
 // a stale roster, and re-toasting the event before it, since its id differs
@@ -540,6 +694,10 @@ async function poll() {
       showToast(data.last_event);
       lastEventId = incomingId;
     }
+    // After the toast: when a parked tap resolves, its event and the cleared
+    // pending_tap arrive in the same reply, and the toast has to be up
+    // before the question comes down.
+    syncTapChoice(data.pending_tap);
   } catch (e) {
     report("poll-failed", e);
   }
@@ -758,5 +916,20 @@ async function loadObjectives() {
   }
 }
 
+// Preset away locations for the leaving dialog. Same cadence as the
+// objectives so an edit to config/locations.json lands without a restart;
+// they are read into `locations` and only rendered when a dialog opens.
+async function loadLocations() {
+  try {
+    const res = await fetch("/api/locations");
+    const data = await res.json();
+    locations = Array.isArray(data.locations) ? data.locations : [];
+  } catch (e) {
+    report("locations-load-failed", e);
+  }
+}
+
 loadObjectives();
-setInterval(loadObjectives, 60000); // pick up edits to objectives.json without a restart
+loadLocations();
+// pick up edits to objectives.json / locations.json without a restart
+setInterval(() => { loadObjectives(); loadLocations(); }, 60000);

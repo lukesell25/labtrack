@@ -33,6 +33,16 @@ function escapeHtml(str) {
 // same thing in both places.
 const NO_CARD = '<span class="roster__nocard">No card</span>';
 
+// Labels per status / event action, matching the kiosk (main.js). The note
+// column carries a checkout comment or, for away, the location - the server
+// puts whichever applies in `note`.
+const STATUS_LABELS = { in: "In lab", away: "Away", out: "Out" };
+const ACTION_LABELS = { in: "Checked in", away: "Away", out: "Checked out" };
+
+function statusClass(status) {
+  return status === "in" ? "is-in" : status === "away" ? "is-away" : "";
+}
+
 function noteText(manual, note) {
   const parts = [];
   if (manual) parts.push(NO_CARD);
@@ -49,11 +59,11 @@ function renderRoster(roster) {
   if (skipIfUnchanged("roster", roster)) return;
   const el = document.getElementById("dash-roster");
   el.innerHTML = roster.map(m => `
-    <div class="roster__card ${m.status === 'in' ? 'is-in' : ''}">
+    <div class="roster__card ${statusClass(m.status)}">
       <div class="roster__ring"></div>
       <div class="roster__meta">
         <div class="roster__name">${escapeHtml(m.display_name)}</div>
-        <div class="roster__status">${m.status === 'in' ? 'In lab' : 'Out'}${m.since ? ' · since ' + fmtDateTime(m.since) : ''}</div>
+        <div class="roster__status">${STATUS_LABELS[m.status] || escapeHtml(m.status)}${m.since ? ' · since ' + fmtDateTime(m.since) : ''}</div>
         ${noteLine(m.manual, m.note)}
       </div>
     </div>
@@ -76,7 +86,7 @@ function renderEvents(events) {
     <tr>
       <td>${fmtDateTime(e.timestamp)}</td>
       <td>${escapeHtml(e.display_name)}</td>
-      <td class="action-${e.action}">${e.action === 'in' ? 'Checked in' : 'Checked out'}</td>
+      <td class="action-${escapeHtml(e.action)}">${ACTION_LABELS[e.action] || escapeHtml(e.action)}</td>
       <td>${noteText(e.manual, e.note) || '—'}</td>
       <td class="dash__table-action">
         <button class="row-delete" data-event-id="${e.id}"

@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Flask app for a Raspberry Pi that identifies lab members by tapping a DoD
-CAC (smart card) on a USB reader (no PIN), logs check-in/check-out events to
-SQLite, drives an always-on kiosk display (status board / screensaver +
-toast confirmation), and serves a dashboard viewable from other PCs on the
-network behind a shared password (see `webauth.py`).
+CAC (smart card) on a USB reader (no PIN), logs check-in/away/check-out
+events to SQLite, drives an always-on kiosk display (status board /
+screensaver + toast confirmation), and serves a dashboard viewable from
+other PCs on the network behind a shared password (see `webauth.py`).
 
 ## Developing locally (off the Pi)
 
@@ -35,11 +35,16 @@ curl -X POST http://localhost:5000/api/manual-toggle \
 ```
 
 Each call toggles that member in/out, so run it twice to exercise both the
-check-in toast and the checkout note prompt. Clicking a name on the kiosk
-page does the same thing through the UI (see "Checking in without a card"
-below). Either way the event is flagged `manual` and carries a "No card"
-mark on the board - that is production behaviour, not a dev shortcut, so
-neither is a byte-for-byte stand-in for a tap.
+check-in toast and the checkout note prompt. Add `"action": "away",
+"location": "Server room"` (or `"action": "in"`/`"out"`) to record a
+specific state rather than a toggle. Clicking a name on the kiosk page does
+the same thing through the UI (see "Checking in without a card" below).
+Either way the event is flagged `manual` and carries a "No card" mark on
+the board - that is production behaviour, not a dev shortcut, so neither is
+a byte-for-byte stand-in for a tap. The one thing that can't be simulated
+without a reader is the question a tap asks (see "Three states" below):
+that path starts in the CAC monitor thread. To see the dialog itself, click
+the name of someone who is in.
 
 Then open `http://localhost:5000` (kiosk display) and
 `http://localhost:5000/dashboard` in a browser. There is no test suite or
@@ -49,15 +54,76 @@ the routes/UI directly.
 `scripts/setup.sh` is the Pi deployment installer only (installs
 `pcscd`/`opensc`, kiosk Chromium, systemd services) — never run it in dev.
 
+### Three states: in, away, out
+
+A member is `in` (in the lab), `away` (at work but not in the lab - the
+server room, a lecture hall) or `out` (gone home, at lunch). `away` exists
+because "not in the lab" and "not at work" are different facts and the old
+two-state log could only record the second. Things that follow from it:
+
+- **A tap from someone who is `in` is a question, not an event.** They are
+  leaving, but the tap can't say whether for the day or for the server
+  room, and guessing either way writes a wrong row. So `_handle_tap()` parks
+  it as `_pending_tap` in `app.py` (under `_state_lock`), `/api/state`
+  carries it as `pending_tap`, the kiosk puts the question up, and the
+  answer comes back on `POST /api/tap-choice` `{tap_id, action, location}`.
+  A tap from anyone else (out *or* away) is written immediately as `in`:
+  they are standing at the lab's reader, which answers the question by
+  itself. The event a tap-choice writes is **not** flagged `manual` - a card
+  was read; the choice is the second half of the same tap.
+- **The server owns the deadline.** With no answer in `TAP_CHOICE_TIMEOUT_S`
+  (20s) a `threading.Timer` records a checkout - what a tap meant before
+  there was a question - so a tap is logged even if the kiosk browser is
+  dead, and walking off without choosing still logs it. The kiosk dialog
+  *mirrors* `pending_tap` (`syncTapChoice()` in `main.js`: a new id opens it,
+  null closes it) rather than running its own clock, so a page reload
+  mid-question comes back showing the question and the server's timeout
+  takes it down with no help. The page's own timer on that dialog is only a
+  backstop for a poll that has died. There is exactly one pending slot: a
+  different member tapping while one is unanswered resolves the old one to
+  its default first, and the same member re-tapping just restarts the
+  clock. `_take_pending_tap()` is the one atomic claim, so a choice and a
+  timeout arriving together resolve it once. A manual event for the pending
+  member (from the dashboard, say) also claims it - a timeout landing
+  afterwards would otherwise write a checkout on top of the answer.
+- **Where they went is the event's `note`.** Same column as a checkout
+  comment: both are the one line of free text a status carries, and
+  `get_roster_status()` surfaces `note` for whichever of `out`/`away` is
+  current (never for `in`). On the kiosk it shares the roster card's third
+  line with the `NO CARD` mark, exactly as a checkout note does - the card's
+  height is pinned to three lines (below). Presets come from
+  `config/locations.json` (`/api/locations`, re-read every 60s alongside the
+  objectives, rendered as buttons only when the dialog opens); "Other…"
+  reveals a text box, and an empty location is allowed since the kiosk
+  usually has no keyboard.
+- **Away is working time.** `get_weekly_hours()` opens a span at `in` *or*
+  `away` when none is open and closes it only at `out`, so in → away → in →
+  out is one span. `away` while already `away` is allowed (a change of
+  location); `in` while `in` or `out` while `out` is a `ValueError` in
+  `record_event()` and a 409 from the API - it says nothing new and would
+  unpair the hours.
+- **The colour is its own** (`--away`, blue) with a hollow ring on the
+  roster card, so "away" never reads as "in" from across the room.
+- **The `CHECK` constraint needed a table rebuild.** SQLite can't widen a
+  `CHECK`, so `_migrate_allow_away_action()` copies `events` into a new
+  table with ids intact (the dashboard holds them for its delete buttons)
+  and swaps it in. Idempotent: it keys on whether the stored `CREATE TABLE`
+  names `'away'`.
+
 ### Checking in without a card
 
 Clicking a name on the roster strip checks that person in or out without a
 CAC. It exists for a dead reader, a card left at home, and the stretch
 before the reader is installed at all, so it has to work with a mouse and
-nothing else - hence a two-button confirmation dialog (`.confirm`,
-`openConfirm()`/`submitConfirm()` in `main.js`) rather than anything typed.
-It posts to the same `/api/manual-toggle` the dev loop and the network
-fallback use.
+nothing else - hence a dialog of buttons (`.confirm`, `openDialog()` /
+`submitChoice()` in `main.js`) rather than anything typed. It posts to the
+same `/api/manual-toggle` the dev loop and the network fallback use, with
+an explicit `action` (and `location` for away). The same dialog element is
+what a tap's question uses (above); `dialog.mode` is `"click"` or `"tap"`,
+and the buttons shown depend on the member's current status: out → Check
+in; in → Check out plus the away presets; away → Back in lab / Check out.
+A tap dialog has no Cancel, ignores Escape and the backdrop, and posts to
+`/api/tap-choice` instead.
 
 - **Every event it writes is flagged `manual`, and the board says so.** The
   kiosk prints an amber `NO CARD` under that person's name until their next
@@ -79,8 +145,13 @@ fallback use.
   stray click silently logs somebody in or out and the only trace is a line
   in an append-only log. The dialog cancels on a backdrop click, on
   Escape, and on a 20s timeout, so an abandoned one can't sit on the board.
-  A card tap arriving mid-dialog supersedes it - `showToast()` calls
-  `closeConfirm()`.
+  An event arriving mid-dialog supersedes a *click* dialog - `showToast()`
+  calls `closeConfirm()` for `mode === "click"` only. A tap dialog is left
+  to `syncTapChoice()`, which takes it down when the server's `pending_tap`
+  clears; an unrelated event landing meanwhile shows its toast over the
+  question for 4s rather than dismissing it. A new pending tap does the
+  reverse and hides any toast (a note prompt included) - the person at the
+  reader outranks it.
 - **The pointer is hidden by default and revealed by movement.**
   `body.kiosk` is `cursor: none`; a `mousemove` listener adds `has-pointer`
   and drops it again after `POINTER_IDLE_MS` (8s), so the strip is
@@ -97,7 +168,7 @@ fallback use.
   a native border and centred system text. The click handler is delegated
   to `#roster`, since `renderRoster()` replaces the strip wholesale.
 - **`poll()` numbers its own requests and drops out-of-order replies.**
-  `submitConfirm()` fires a poll the instant the POST returns instead of
+  `submitChoice()` fires a poll the instant the POST returns instead of
   waiting out `POLL_MS`, so two are briefly in flight; the older reply
   carries pre-click state and would repaint a stale roster and re-toast the
   event before it. That is also why the toast is left to the poll rather
@@ -202,7 +273,7 @@ worth knowing before changing the video:
 
 ### Overlays over the background video
 
-The toast, the "reading card" overlay, the click-to-toggle confirmation
+The toast, the "reading card" overlay, the click-to-toggle / tap-question
 dialog and the reboot notice are full-screen `position: fixed` layers. When a background video is
 configured they go translucent so it stays visible through the whole tap
 flow; with no video they stay fully opaque, which lets the compositor skip
@@ -370,7 +441,10 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   `_reader_status["reading"]` (so the kiosk can show "reading card..."
   between physical tap and PKCS#11 read completing). `_push_event()` also
   returns a snapshot of what it published, which is what `/api/manual-toggle`
-  reports back to its caller. It also holds
+  reports back to its caller; it carries `previous` (the status the event
+  replaced, so the toast can say "Back in lab") and `location`. The same
+  lock guards `_pending_tap`, a tap from someone `in` waiting for its
+  "leaving, or stepping away?" answer - see "Three states" above. It also holds
   `_kiosk_status["last_poll"]`, stamped only by requests carrying
   `?src=kiosk`, so the health heartbeat can tell a dead kiosk browser from a
   live one — the dashboard polls the same endpoint from other PCs and must
@@ -387,12 +461,22 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   multiple CAC monitors fighting over the reader and per-worker copies of
   `_last_event`, so the kiosk would miss toasts depending on which worker
   answered the poll. Keep it single-worker.
-- **`/api/manual-toggle`** — toggles a member without a card, for the kiosk's
-  click-a-name flow, the network fallback when the reader is down, and dev
-  machines with no reader at all. Everything it writes is flagged `manual`,
+- **`/api/manual-toggle`** — records an event for a member without a card,
+  for the kiosk's click-a-name flow, the network fallback when the reader is
+  down, and dev machines with no reader at all. `{member_id}` alone toggles
+  (in → out, out or away → in); `action` (`in`/`away`/`out`) plus `location`
+  says exactly what to write. Everything it writes is flagged `manual`,
   because none of it saw a card. An unknown `member_id` is a 400, not a 500:
   a kiosk page left open across a roster change is holding stale ids, which
-  is not a server fault.
+  is not a server fault. An action that changes nothing is a 409 for the
+  same reason - the page is behind, and its next poll fixes that.
+- **`/api/tap-choice`** — the kiosk's answer to a parked tap (`_pending_tap`,
+  "Three states" above): `{tap_id, action: "away"|"out", location}`. The id
+  must match the tap still pending, so an answer to a question that already
+  timed out is a 409 and writes nothing - the checkout the timeout recorded
+  stands. Not flagged `manual`.
+- **`/api/locations`** — the preset away places from `config/locations.json`,
+  `[]` when the file is missing.
 - **`request_reboot()`** — the board's only self-recovery path, for the one
   failure it cannot otherwise survive: the `stop_streaming` freeze
   (Performance above) kills the display while gunicorn keeps serving and the
@@ -581,19 +665,22 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   history reconnects. A config that parses but lists no members is treated
   as a bad edit and deactivates nobody — otherwise one stray comma blanks
   the whole board until someone notices and restarts) and
-  `events` (check-in/out log, appended to by every path that writes one and
-  edited nowhere except the dashboard's admin section above; `action` is
-  `'in'`/`'out'`,
-  current status for a member = the most recent event, `note` is the
-  optional checkout comment, `manual` is 1 when no card was read - see
+  `events` (check-in/away/out log, appended to by every path that writes
+  one - all of them through `record_event()`, which `toggle_checkin()`
+  wraps - and edited nowhere except the dashboard's admin section above;
+  `action` is one of `ACTIONS` = `'in'`/`'away'`/`'out'`, current status for
+  a member = the most recent event, `note` is the optional checkout comment
+  or the away location, `manual` is 1 when no card was read - see
   "Checking in without a card" above. `get_roster_status()` surfaces
-  `manual` for whichever event set the member's current status, in both
-  directions, unlike `note`; an unverified check-*in* is the half worth
-  flagging). `get_weekly_hours()` computes hours by pairing
-  consecutive in/out events over the last 7 days, counting an unmatched
-  trailing `in` up to now.
-  - Backfilling attendance by hand is `scripts/add-event.py` (name, `in`/`out`,
-    timestamp), for a reader outage or a missed tap. `/api/manual-toggle` can't
+  `manual` for whichever event set the member's current status, in all
+  directions, unlike `note`, which is only shown while out or away; an
+  unverified check-*in* is the half worth flagging). `get_weekly_hours()`
+  computes hours over the last 7 days by opening a span at `in` or `away`
+  (when none is open) and closing it at `out`, counting an unmatched
+  trailing span up to now - see "Three states" above.
+  - Backfilling attendance by hand is `scripts/add-event.py` (name,
+    `in`/`away`/`out`, timestamp; `--note` is the location for `away`), for
+    a reader outage or a missed tap. `/api/manual-toggle` can't
     do it: it stamps `datetime.now()` and flips whatever the current status is.
     Because the pairing above is positional, an event inserted into the middle
     of an existing sequence can silently unpair it, so the script previews the
@@ -605,7 +692,8 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     a column means a `_migrate_*` helper that checks
     `PRAGMA table_info` and `ALTER TABLE`s if missing — see
     `_migrate_add_note_column()` and `_migrate_add_manual_column()` for the
-    pattern, and
+    pattern, `_migrate_allow_away_action()` for a change SQLite can't
+    `ALTER` (a `CHECK` constraint - it rebuilds the table, ids intact), and
     `_migrate_hash_edipi_column()` for one that rewrites data as well as
     shape (it renames `edipi` → `edipi_hash` and rehashes in place — in
     place specifically so `members.id`, and therefore every `events` row
@@ -643,7 +731,7 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   the running time; it is still one string compared once a second, so the
   date costs nothing on top of the clock that was already there.
 - **Checkout notes** — an optional "why are you out" comment, threaded
-  through several layers: `toggle_checkin()` returns `checkin_event_id`
+  through several layers: `record_event()` returns `checkin_event_id`
   (the new row's id) → `_push_event()` puts it on `_last_event` → the kiosk
   sees it in `/api/state` and, only for `action === "out"`, shows a text
   input instead of auto-hiding the toast (15s timeout, arrow keys move
@@ -679,6 +767,10 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `roster.key` lives and that isn't the Pi. Placeholders are excluded from
     `_warn_if_roster_key_lost()`'s counts: no key made them, so they say
     nothing about whether the current one is right.
+- **`config/locations.json`** — preset places for the away state, shown as
+  buttons on the kiosk's leaving dialog. Re-read every 60s with the
+  objectives; "Other…" always exists as well, so the file only has to list
+  the common ones.
 - **`config/objectives.json`** — kiosk screensaver text. Each objective
   becomes one full-panel slide in the media rotation (see below). Re-read by
   the frontend every 60s with no restart needed (`/api/objectives`); a change
@@ -690,8 +782,10 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   below) — the polls are frequent, the data
   almost never changes. `main.js` drives the kiosk
   (`templates/index.html`): polls `/api/state` every `POLL_MS` (1.5s) to show
-  toast confirmations and the "reading card..." overlay, drives the slide
-  rotation, and reloads objectives every 60s. `lastEventId` starts as `null`, not `0`, deliberately — the first poll
+  toast confirmations, the "reading card..." overlay and a parked tap's
+  question (`syncTapChoice()`, run *after* the toast so a resolving tap's
+  event is on screen before its question comes down), drives the slide
+  rotation, and reloads objectives and locations every 60s. `lastEventId` starts as `null`, not `0`, deliberately — the first poll
   only establishes a baseline so a stale event doesn't pop a toast on page
   load, and `0` would make "no baseline" indistinguishable from a real
   first event. `dashboard.js` drives `templates/dashboard.html`: polls

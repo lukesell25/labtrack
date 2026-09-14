@@ -24,6 +24,13 @@ MEMBERS_CONFIG = Path(__file__).parent / "config" / "members.json"
 # What a pre-hashing members.edipi value looks like, for the migration below.
 _PLAINTEXT_EDIPI = re.compile(r"^\d{10}$")
 
+# The three things an event can say about a member. 'away' is "at work but
+# not in the lab" - the server room, a lecture hall - and sits between the
+# other two: it counts as working time (get_weekly_hours) but not as present
+# (the board shows where they went instead). Where they went is the event's
+# `note`, the same column a checkout comment uses.
+ACTIONS = ("in", "away", "out")
+
 # sqlite3 connections aren't thread-safe to share across threads by default;
 # each thread (Flask request thread, CAC reader thread) gets its own.
 _local = threading.local()
@@ -51,7 +58,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             member_id INTEGER NOT NULL REFERENCES members(id),
-            action TEXT NOT NULL CHECK(action IN ('in', 'out')),
+            action TEXT NOT NULL CHECK(action IN ('in', 'away', 'out')),
             timestamp TEXT NOT NULL,
             note TEXT,
             manual INTEGER NOT NULL DEFAULT 0
@@ -64,6 +71,7 @@ def init_db():
     conn.commit()
     _migrate_add_note_column()
     _migrate_add_manual_column()
+    _migrate_allow_away_action()
     _migrate_hash_edipi_column()
     _warn_if_roster_key_lost()
     sync_members_from_config()
@@ -95,6 +103,49 @@ def _migrate_add_manual_column():
     if "manual" not in cols:
         conn.execute("ALTER TABLE events ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
         conn.commit()
+
+
+def _migrate_allow_away_action():
+    """
+    Installs predating the 'away' status created events with
+    CHECK(action IN ('in', 'out')), and SQLite cannot alter a CHECK in place -
+    the only way to widen it is to rebuild the table. Copy every row across
+    with its id intact: nothing else references events.id, but the dashboard
+    is holding ids for its delete buttons, and a renumbering under a live page
+    would delete the wrong rows. Runs at import time, before the reader and
+    request threads exist, so nothing is writing while the table is swapped.
+
+    Idempotent: the rebuilt table's SQL names 'away', so a second start skips
+    it. Ordered after the note/manual column migrations, so the copy below can
+    name every column the new table has.
+    """
+    conn = get_conn()
+    sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+    ).fetchone()
+    if sql is None or "'away'" in sql["sql"]:
+        return
+    conn.executescript(
+        """
+        BEGIN;
+        CREATE TABLE events_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER NOT NULL REFERENCES members(id),
+            action TEXT NOT NULL CHECK(action IN ('in', 'away', 'out')),
+            timestamp TEXT NOT NULL,
+            note TEXT,
+            manual INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO events_new (id, member_id, action, timestamp, note, manual)
+            SELECT id, member_id, action, timestamp, note, manual FROM events;
+        DROP TABLE events;
+        ALTER TABLE events_new RENAME TO events;
+        CREATE INDEX IF NOT EXISTS idx_events_member_time
+            ON events(member_id, timestamp);
+        COMMIT;
+        """
+    )
+    log.info("Rebuilt the events table to allow the 'away' action")
 
 
 def _migrate_hash_edipi_column():
@@ -339,46 +390,82 @@ def _last_event_for_member(conn, member_id: int):
 
 
 def current_status(member_id: int) -> str:
-    """Returns 'in' or 'out'. Defaults to 'out' if no events yet."""
+    """Returns 'in', 'away' or 'out'. Defaults to 'out' if no events yet."""
     conn = get_conn()
     row = _last_event_for_member(conn, member_id)
     return row["action"] if row else "out"
 
 
-def toggle_checkin(member_id: int, manual: bool = False) -> dict:
+def record_event(member_id: int, action: str, location: str | None = None,
+                 manual: bool = False) -> dict:
     """
-    Flips a member's status (in <-> out) and logs the event.
-    Returns the event dict: {member_id, display_name, action, timestamp,
-    checkin_event_id, manual}. checkin_event_id is the events table row id,
-    used to attach an optional note afterward via set_event_note().
+    Logs one event for a member and returns it as a dict: {member_id,
+    display_name, action, previous, timestamp, checkin_event_id, location,
+    manual}. `previous` is the status this event replaced, which is what lets
+    the kiosk say "Back in lab" rather than "Checked in" for a return from
+    away. checkin_event_id is the events table row id, used to attach an
+    optional note afterward via set_event_note().
+
+    `location` is where an 'away' member went, stored in the row's `note`
+    column - the same column a checkout comment lands in, since both are the
+    one line of free text a status can carry and get_roster_status() shows
+    whichever applies. It is ignored for 'in'.
 
     manual=True records that no card was involved - the kiosk's click-a-name
     path and /api/manual-toggle. It is stored per event rather than derived
     later because nothing else in the row distinguishes the two, and the
     board says so beside the person's name (see get_roster_status).
+
+    Raises ValueError for an unknown member or action, and for an event that
+    would say nothing new ('in' while in, 'out' while out): the caller is
+    working from a stale view of the board, and a repeated action would
+    unpair the hours report. 'away' while away is allowed - that is a change
+    of location.
     """
+    if action not in ACTIONS:
+        raise ValueError(f"Unknown action {action!r}")
     conn = get_conn()
     member = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
     if member is None:
         raise ValueError(f"Unknown member_id {member_id}")
 
-    new_action = "out" if current_status(member_id) == "in" else "in"
+    previous = current_status(member_id)
+    if action == previous and action != "away":
+        raise ValueError(f"Already {action}")
+
+    location = (location or "").strip() or None
+    if action == "in":
+        location = None
     now = datetime.now().isoformat(timespec="seconds")
 
     cursor = conn.execute(
-        "INSERT INTO events (member_id, action, timestamp, manual) VALUES (?, ?, ?, ?)",
-        (member_id, new_action, now, 1 if manual else 0),
+        "INSERT INTO events (member_id, action, timestamp, note, manual) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (member_id, action, now, location, 1 if manual else 0),
     )
     conn.commit()
 
     return {
         "member_id": member_id,
         "display_name": member["display_name"],
-        "action": new_action,
+        "action": action,
+        "previous": previous,
         "timestamp": now,
         "checkin_event_id": cursor.lastrowid,
+        "location": location,
         "manual": bool(manual),
     }
+
+
+def toggle_checkin(member_id: int, manual: bool = False) -> dict:
+    """
+    Flips a member between present and not: in -> out, and out *or away* ->
+    in. Returns what record_event() does. This is the no-questions-asked path
+    (the dev loop's curl, the network fallback); anything that wants to say
+    where someone went calls record_event() with 'away' and a location.
+    """
+    action = "out" if current_status(member_id) == "in" else "in"
+    return record_event(member_id, action, manual=manual)
 
 
 def set_event_note(event_id: int, note: str | None):
@@ -424,7 +511,7 @@ def delete_event(event_id: int) -> bool:
     conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
     conn.commit()
     log.warning(
-        "Deleted event %d: %s checked %s at %s",
+        "Deleted event %d: %s %s at %s",
         event_id, row["display_name"], row["action"], row["timestamp"],
     )
     return True
@@ -495,9 +582,11 @@ def get_roster_status():
                     "display_name": m["display_name"],
                     "status": status,
                     "since": last["timestamp"] if last else None,
-                    # Only surface the note while they're actually out - it's tied
-                    # to that specific checkout, not a persistent profile field.
-                    "note": last["note"] if (last and status == "out") else None,
+                    # The note is either a checkout comment or an away location,
+                    # and either way it belongs to that one event, not to the
+                    # person - so it is only surfaced while that event is the
+                    # current one, and never on an 'in'.
+                    "note": last["note"] if (last and status != "in") else None,
                     # Whether the event that put them in this state was a click
                     # rather than a tap. Unlike the note, this applies to both
                     # directions: an unverified check-*in* is the half worth
@@ -534,9 +623,13 @@ def get_recent_events(limit: int = 50):
 
 def get_weekly_hours():
     """
-    Rough hours-in-lab per member over the last 7 days, computed by pairing
-    consecutive in/out events. An unmatched trailing 'in' (still checked in)
-    counts up to now.
+    Rough hours-at-work per member over the last 7 days. A working span opens
+    at an 'in' and closes at the next 'out'; 'away' is still at work, so it
+    neither opens a new span nor closes the current one - in/away/in/out is
+    one span from the first 'in' to the 'out'. An 'away' with no span open
+    (the window cut through one, or a day that began away) opens one, since
+    the person is at work either way. An unmatched trailing span (still in,
+    or still away) counts up to now.
     """
     conn = get_conn()
     since = (datetime.now() - timedelta(days=7)).isoformat(timespec="seconds")
@@ -554,16 +647,17 @@ def get_weekly_hours():
         ).fetchall()
 
         total = timedelta()
-        pending_in = None
+        span_start = None
         for r in rows:
             ts = datetime.fromisoformat(r["timestamp"])
-            if r["action"] == "in":
-                pending_in = ts
-            elif r["action"] == "out" and pending_in is not None:
-                total += ts - pending_in
-                pending_in = None
-        if pending_in is not None:
-            total += datetime.now() - pending_in
+            if r["action"] in ("in", "away"):
+                if span_start is None:
+                    span_start = ts
+            elif r["action"] == "out" and span_start is not None:
+                total += ts - span_start
+                span_start = None
+        if span_start is not None:
+            total += datetime.now() - span_start
 
         results[m["display_name"]] = round(total.total_seconds() / 3600, 1)
 

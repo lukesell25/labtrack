@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Log a check-in or check-out at a time you name, for when the reader was down
-or someone forgot to tap.
+Log a check-in, an away, or a check-out at a time you name, for when the
+reader was down or someone forgot to tap.
 
-    python3 scripts/add-event.py "Luke Sellmayer" in  "2026-08-27 08:15"
-    python3 scripts/add-event.py "Luke Sellmayer" out "2026-08-27 16:40" --note "left early"
+    python3 scripts/add-event.py "Luke Sellmayer" in   "2026-08-27 08:15"
+    python3 scripts/add-event.py "Luke Sellmayer" away "2026-08-27 10:00" --note "Server room"
+    python3 scripts/add-event.py "Luke Sellmayer" in   "2026-08-27 11:30"
+    python3 scripts/add-event.py "Luke Sellmayer" out  "2026-08-27 16:40" --note "left early"
     python3 scripts/add-event.py --list
 
 /api/manual-toggle is the other manual path, but it stamps the current time
 and flips whatever the member's status happens to be; this one places a
 specific action at a specific moment, which is what backfilling needs.
 
-`events` is append-only and the hours report pairs consecutive in/out rows
-per member, so a backfilled event lands in the middle of an existing
-sequence and can quietly corrupt it - two 'in's in a row makes the first one
-unpaired, and an unpaired 'in' counts as time in the lab right up to now.
+`events` is append-only and the hours report pairs an 'in' with the next
+'out' per member ('away' is still at work, so it neither opens nor closes a
+span), so a backfilled event lands in the middle of an existing sequence and
+can quietly corrupt it - two 'in's in a row makes the first one unpaired,
+and an unpaired 'in' counts as time at work right up to now.
 The insert is therefore previewed against its neighbours and confirmed
 before it happens. Nothing here needs an app restart: the kiosk and
 dashboard re-read the DB on their next poll.
@@ -29,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import database  # noqa: E402
 
-# What database.toggle_checkin() writes, and what get_weekly_hours() parses
+# What database.record_event() writes, and what get_weekly_hours() parses
 # back with fromisoformat(). Local time, no timezone suffix.
 TS_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
@@ -100,7 +103,10 @@ def neighbours(conn, member_id: int, stamp: str):
 
 
 def describe(row) -> str:
-    return f"{row['timestamp']}  {row['action']:<3} (id {row['id']})"
+    return f"{row['timestamp']}  {row['action']:<4} (id {row['id']})"
+
+
+SHOWS_AS = {"in": "checked in", "away": "away", "out": "checked out"}
 
 
 def warnings_for(action: str, before, after, note: str | None) -> list[str]:
@@ -109,30 +115,43 @@ def warnings_for(action: str, before, after, note: str | None) -> list[str]:
     wrong-looking board, phrased as what it will actually do.
     """
     out = []
-    if before is not None and before["action"] == action:
+    # Two 'away's in a row is a change of location, not a problem; a repeated
+    # 'in' or 'out' is.
+    if action != "away":
+        if before is not None and before["action"] == action:
+            out.append(
+                f"The previous event is also '{action}', so the sequence reads "
+                f"{action}/{action}. get_weekly_hours() pairs an 'in' with the "
+                "next 'out' - one of the two will go unpaired."
+            )
+        if after is not None and after["action"] == action:
+            out.append(
+                f"The next event is also '{action}', same problem in the other direction."
+            )
+    if action == "away" and before is not None and before["action"] == "out":
         out.append(
-            f"The previous event is also '{action}', so the sequence reads "
-            f"{action}/{action}. get_weekly_hours() pairs consecutive in/out "
-            "events - one of the two will go unpaired."
-        )
-    if after is not None and after["action"] == action:
-        out.append(
-            f"The next event is also '{action}', same problem in the other direction."
+            "The previous event is an 'out', so this reads as going away without "
+            "having come in. The hours report will open a working span here anyway."
         )
     if after is None:
         out.append(
             "This becomes the member's newest event, so it sets what the kiosk "
-            f"and dashboard show right now: {'checked in' if action == 'in' else 'checked out'}."
+            f"and dashboard show right now: {SHOWS_AS[action]}."
         )
-        if action == "in":
+        if action in ("in", "away"):
             out.append(
-                "An 'in' with no 'out' after it counts as time in the lab up to "
+                f"An '{action}' with no 'out' after it counts as time at work up to "
                 "now on the hours report - add the matching 'out' as well."
             )
     if note and action == "in":
         out.append(
-            "Notes are the checkout comment: get_roster_status() only surfaces one "
-            "while the member is out, so a note on an 'in' event is stored and never shown."
+            "Notes are the checkout comment or the away location: get_roster_status() "
+            "only surfaces one while the member is out or away, so a note on an 'in' "
+            "event is stored and never shown."
+        )
+    if action == "away" and not note:
+        out.append(
+            "No --note, so the board will say 'Away' with no location."
         )
     return out
 
@@ -142,9 +161,11 @@ def main() -> int:
         description="Log a check-in/check-out at a specific time.",
     )
     parser.add_argument("display_name", nargs="?", help="Member's name, or part of it")
-    parser.add_argument("action", nargs="?", choices=["in", "out"], help="Check in or out")
+    parser.add_argument("action", nargs="?", choices=list(database.ACTIONS),
+                        help="Check in, away (at work, not in the lab), or out")
     parser.add_argument("timestamp", nargs="?", help='Local time, e.g. "2026-08-27 08:15"')
-    parser.add_argument("--note", help="Optional checkout comment (shown while they're out)")
+    parser.add_argument("--note", help="Checkout comment, or where they went for 'away' "
+                                       "(shown while they're out / away)")
     parser.add_argument("--list", action="store_true", help="list members and exit")
     parser.add_argument("-y", "--yes", action="store_true", help="skip the confirmation")
     args = parser.parse_args()
@@ -158,7 +179,7 @@ def main() -> int:
         return 0
 
     if not (args.display_name and args.action and args.timestamp):
-        parser.error("give a name, an action (in/out) and a timestamp, or use --list")
+        parser.error("give a name, an action (in/away/out) and a timestamp, or use --list")
 
     member = resolve_member(conn, args.display_name)
     stamp = parse_timestamp(args.timestamp).strftime(TS_FORMAT)
@@ -166,7 +187,7 @@ def main() -> int:
 
     print(f"{member['display_name']}" + ("" if member["active"] else "  (inactive)"))
     print(f"  {describe(before) if before else '(no earlier events)'}")
-    print(f"> {stamp}  {args.action:<3} " + (f"note: {args.note}" if args.note else ""))
+    print(f"> {stamp}  {args.action:<4} " + (f"note: {args.note}" if args.note else ""))
     print(f"  {describe(after) if after else '(no later events)'}")
 
     for warning in warnings_for(args.action, before, after, args.note):

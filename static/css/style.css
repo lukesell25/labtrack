@@ -12,6 +12,10 @@
   --amber-dim: #7a5900;
   --phosphor: #34e0a1;
   --phosphor-dim: #17513c;
+  /* "Away": at work but not in the lab. Its own hue rather than a shade of
+     in-green or out-amber, since it is neither - the board has to answer
+     "is anyone here?" from across the room. */
+  --away: #6ec3ff;
   --danger: #ff5a5a;
 
   --mono: ui-monospace, "DejaVu Sans Mono", monospace;
@@ -19,6 +23,12 @@
 }
 
 * { box-sizing: border-box; }
+
+/* main.js shows and hides the dialog's buttons with the hidden attribute.
+   The UA default is display:none, but a class rule that sets display on the
+   same element would outrank it (.confirm__away is a flex column), so say it
+   here with enough weight to win. */
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;
@@ -446,6 +456,11 @@ body.kiosk.has-pointer .roster__card:hover {
   background: var(--phosphor);
 }
 
+/* Half-state ring: coloured but hollow. Present-but-elsewhere, at a glance. */
+.roster__card.is-away .roster__ring {
+  border-color: var(--away);
+}
+
 .roster__meta {
   min-width: 0;
 }
@@ -468,6 +483,10 @@ body.kiosk.has-pointer .roster__card:hover {
 
 .roster__card.is-in .roster__status {
   color: var(--phosphor);
+}
+
+.roster__card.is-away .roster__status {
+  color: var(--away);
 }
 
 .roster__note {
@@ -525,6 +544,10 @@ body.kiosk.has-pointer .roster__card:hover {
 
 .toast.is-out .toast__action {
   color: var(--amber);
+}
+
+.toast.is-away .toast__action {
+  color: var(--away);
 }
 
 .toast.is-error .toast__name {
@@ -607,10 +630,23 @@ body.kiosk.has-pointer .roster__card:hover {
   outline-offset: 1px;
 }
 
+/* Each action button carries the colour its state has everywhere else on
+   the board: in is green, out is amber, away is blue. Cancel and "Other"
+   stay neutral. */
 .toast__note-btn--save,
-.confirm__btn--go {
+.confirm__btn--out {
   border-color: var(--amber);
   color: var(--amber);
+}
+
+.confirm__btn--in {
+  border-color: var(--phosphor);
+  color: var(--phosphor);
+}
+
+.confirm__btn--away {
+  border-color: var(--away);
+  color: var(--away);
 }
 
 .toast__time {
@@ -658,6 +694,10 @@ body.kiosk.has-pointer .roster__card:hover {
   color: var(--amber);
 }
 
+.confirm.is-away .confirm__action {
+  color: var(--away);
+}
+
 .confirm__hint {
   font-family: var(--mono);
   font-size: 0.9rem;
@@ -677,6 +717,62 @@ body.kiosk.has-pointer .roster__card:hover {
 .confirm__btn {
   font-size: 1.05rem;
   padding: 0.8rem 1.75rem;
+}
+
+/* The "still at work" row under Check out: a label, a button per preset
+   location, and the text box "Other..." reveals. Only shown to someone who
+   is in - it is the second half of "leaving the lab?". */
+.confirm__away {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--hairline);
+  width: min(90vw, 640px);
+}
+
+.confirm__away-label {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-low);
+}
+
+/* The preset row wraps rather than overflowing if the config lists many. */
+.confirm__locations {
+  margin-top: 0;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.confirm__other {
+  display: flex;
+  gap: 0.75rem;
+  width: min(90vw, 480px);
+}
+
+.confirm__input {
+  flex: 1;
+  min-width: 0;
+  background: var(--graphite-800);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-family: var(--sans);
+  font-size: 1.05rem;
+  color: var(--text-hi);
+}
+
+.confirm__input:focus {
+  outline: none;
+  border-color: var(--away);
+}
+
+.confirm__input::placeholder {
+  color: var(--text-low);
 }
 
 /* ---- reboot notice ----------------------------------------------- */
@@ -804,6 +900,12 @@ body.dashboard {
 
 .dash__roster .roster__card { background: var(--graphite-800); }
 
+.dash__help {
+  margin: -0.5rem 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-low);
+}
+
 .dash__table {
   width: 100%;
   border-collapse: collapse;
@@ -830,6 +932,7 @@ body.dashboard {
 .dash__table tr:hover td { background: var(--graphite-700); }
 
 .action-in { color: var(--phosphor); }
+.action-away { color: var(--away); }
 .action-out { color: var(--amber); }
 
 /* ---- admin controls (dashboard only) ----------------------------- */
