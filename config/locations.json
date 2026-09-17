@@ -2,6 +2,6 @@
   "_comment": "Places a member can be while 'at work but not in the lab'. Each becomes a button on the kiosk's leaving dialog (a tap or a click by someone who is in); 'Other' is always offered as well and lets them type one. Re-read every 60s, no restart needed.",
   "locations": [
     "Server room",
-    "Lecture hall"
+    "Capstone"
   ]
 }
