@@ -12,11 +12,15 @@
     <header class="board__header">
       <div class="board__eyebrow">FALCON AI RESEARCH LAB</div>
       <div class="board__meta">
-        <!-- Whether a card reader is actually attached. Sampled server-side
-             (cac_reader.start_reader_watch) and delivered on /api/state; the
-             starting text is the "not yet polled" state, replaced within a
-             poll or two by renderReader(). -->
-        <div class="board__reader" id="reader-status">Reader</div>
+        <!-- How to check in: the keyboard is the front door (see "keyboard"
+             in main.js). Static text, so it costs nothing after first paint;
+             it sits in the header rather than over the roster strip so it
+             never competes with the names for the strip's pinned height. -->
+        <div class="board__keys" id="keys-hint">
+          <kbd>&larr;</kbd><kbd>&rarr;</kbd> choose your name
+          <span class="board__keys-sep">&middot;</span>
+          <kbd>Enter</kbd> check in / out
+        </div>
         <div class="board__clock" id="clock">--:--:--</div>
       </div>
     </header>
@@ -56,23 +60,17 @@
     <!-- populated by JS -->
   </footer>
 
-  <div class="reading-overlay" id="reading-overlay">
-    <div class="reading-overlay__dot"></div>
-    <div class="reading-overlay__text">Reading card&hellip;</div>
-  </div>
-
-  <!-- The leaving / check-in dialog. Two things open it: clicking a name on
-       the roster strip (no card - the board asks first, because the strip
-       sits under the mouse pointer all day and a stray click must not
-       silently log somebody in or out), and a card tap by someone who is
-       already in, which is ambiguous - going home, or to the server room? -
-       and is not written until they say (or 20s pass, which records a
-       checkout). main.js shows and hides the buttons per state; the away row
-       lists the presets from config/locations.json. -->
+  <!-- The check-in / leaving dialog, opened with Enter on a highlighted name
+       (or a click on it). It always asks first, because a stray keypress or
+       click must not silently move somebody in or out. main.js shows and
+       hides the buttons per state; the away row lists the presets from
+       config/locations.json. -->
   <div class="confirm" id="confirm">
     <div class="confirm__name" id="confirm-name"></div>
     <div class="confirm__action" id="confirm-action"></div>
-    <div class="confirm__hint" id="confirm-hint"></div>
+    <div class="confirm__hint" id="confirm-hint">
+      <kbd>&larr;</kbd><kbd>&rarr;</kbd> choose &middot; <kbd>Enter</kbd> confirm &middot; <kbd>Esc</kbd> cancel
+    </div>
     <div class="confirm__actions">
       <button type="button" id="confirm-cancel" class="confirm__btn">Cancel</button>
       <button type="button" id="confirm-in" class="confirm__btn confirm__btn--in" data-action="in">Check in</button>
@@ -105,10 +103,8 @@
   <div class="toast" id="toast">
     <div class="toast__name" id="toast-name"></div>
     <div class="toast__action" id="toast-action"></div>
-    <!-- Text set by main.js: removing your card is the wrong instruction when
-         nobody used one. -->
-    <div class="toast__hint" id="toast-hint">You may remove your card now</div>
     <div class="toast__note" id="toast-note">
+      <div class="toast__note-hint"><kbd>Enter</kbd> save &middot; <kbd>Esc</kbd> skip</div>
       <input type="text" id="note-input" class="toast__note-input"
              placeholder="Add a note (optional) — e.g. at lunch, back at 14:00" maxlength="80" autocomplete="off">
       <div class="toast__note-actions">

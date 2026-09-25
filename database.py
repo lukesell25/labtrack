@@ -12,21 +12,15 @@ timestamp on any per-person row - see "No time tracking" in CLAUDE.md.
 
 import json
 import logging
-import re
 import sqlite3
 import threading
 from datetime import date
 from pathlib import Path
 
-import identity
-
 log = logging.getLogger("labtrack.db")
 
 DB_PATH = Path(__file__).parent / "labtrack.db"
 MEMBERS_CONFIG = Path(__file__).parent / "config" / "members.json"
-
-# What a pre-hashing members.edipi value looks like, for the migration below.
-_PLAINTEXT_EDIPI = re.compile(r"^\d{10}$")
 
 # The three places a member can be. 'away' is "at work but not in the lab" -
 # the server room, a lecture hall - as distinct from 'out' (lunch, gone home).
@@ -35,7 +29,7 @@ _PLAINTEXT_EDIPI = re.compile(r"^\d{10}$")
 ACTIONS = ("in", "away", "out")
 
 # sqlite3 connections aren't thread-safe to share across threads by default;
-# each thread (Flask request thread, CAC reader thread) gets its own.
+# each thread (Flask request threads, the daily-reset thread) gets its own.
 _local = threading.local()
 
 
@@ -51,23 +45,22 @@ def init_db():
     conn = get_conn()
     conn.executescript(
         """
+        -- Keyed by display name: config/members.json is just a list of names.
         CREATE TABLE IF NOT EXISTS members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            edipi_hash TEXT UNIQUE NOT NULL,
-            display_name TEXT NOT NULL,
+            display_name TEXT UNIQUE NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
         );
 
         -- One row per member who has ever set a status: where they are now,
         -- and nothing about when. `change_id` is a counter, not a clock - it
-        -- orders the board (most recently changed first) and lets a late
-        -- checkout note find the checkout it belongs to (set_note), without
-        -- recording a time. A member with no row reads as 'out'.
+        -- lets a late checkout note find the checkout it belongs to
+        -- (set_note) without recording a time. A member with no row reads as
+        -- 'out'.
         CREATE TABLE IF NOT EXISTS presence (
             member_id INTEGER PRIMARY KEY REFERENCES members(id),
             status TEXT NOT NULL CHECK(status IN ('in', 'away', 'out')),
             note TEXT,
-            manual INTEGER NOT NULL DEFAULT 0,
             change_id INTEGER NOT NULL
         );
 
@@ -81,8 +74,8 @@ def init_db():
     )
     conn.commit()
     _migrate_events_to_presence()
-    _migrate_hash_edipi_column()
-    _warn_if_roster_key_lost()
+    _migrate_drop_manual_column()
+    _migrate_members_by_name()
     sync_members_from_config()
 
 
@@ -90,16 +83,13 @@ def _migrate_events_to_presence():
     """
     Installs from when this was a timesheet kept an append-only `events` log,
     every row timestamped. Carry each member's *current* status across into
-    `presence` - the last event's action, its note while out or away, and its
-    manual flag - then drop the log outright, so the times it held are gone
-    rather than merely unread. VACUUM afterwards because DROP TABLE leaves the
-    old pages in the freelist, where the timestamps would otherwise survive in
-    the file.
+    `presence` - the last event's action, and its note while out or away -
+    then drop the log outright, so the times it held are gone rather than
+    merely unread. VACUUM afterwards because DROP TABLE leaves the old pages
+    in the freelist, where the timestamps would otherwise survive in the file.
 
-    change_id is numbered from the old event ids so the board keeps its
-    most-recent-first order across the upgrade. Older installs may lack the
-    note/manual columns; those read as NULL/0. Idempotent - once `events` is
-    gone this returns immediately.
+    Older installs may lack the note column; that reads as NULL. Idempotent -
+    once `events` is gone this returns immediately.
     """
     conn = get_conn()
     exists = conn.execute(
@@ -109,10 +99,9 @@ def _migrate_events_to_presence():
         return
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
     note = "note" if "note" in cols else "NULL"
-    manual = "manual" if "manual" in cols else "0"
     last = conn.execute(
         f"""
-        SELECT e.member_id, e.action, {note} AS note, {manual} AS manual, e.id
+        SELECT e.member_id, e.action, {note} AS note, e.id
         FROM events e
         WHERE e.id = (
             SELECT id FROM events WHERE member_id = e.member_id
@@ -122,10 +111,10 @@ def _migrate_events_to_presence():
     ).fetchall()
     for r in last:
         conn.execute(
-            "INSERT OR REPLACE INTO presence (member_id, status, note, manual, change_id) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO presence (member_id, status, note, change_id) "
+            "VALUES (?, ?, ?, ?)",
             (r["member_id"], r["action"], r["note"] if r["action"] != "in" else None,
-             1 if r["manual"] else 0, r["id"]),
+             r["id"]),
         )
     conn.execute("DROP TABLE events")
     conn.commit()
@@ -136,198 +125,149 @@ def _migrate_events_to_presence():
     )
 
 
-def _migrate_hash_edipi_column():
+def _migrate_drop_manual_column():
     """
-    Installs predating the hashed roster stored the raw 10-digit EDIPI in
-    members.edipi. Rename the column and replace each value with its hash,
-    in place.
-
-    In place rather than rebuilding the table, because that keeps members.id
-    stable - presence.member_id is a foreign key into it, so reinserting would
-    either fail or detach each member's current status from them.
-    It also takes the plaintext out of the live database, which is half the
-    point of hashing it in the first place. Idempotent (after one pass
-    nothing matches _PLAINTEXT_EDIPI), so it is safe on every startup.
+    presence.manual flagged a status set without a CAC tap ("NO CARD" on the
+    board). The card reader is gone and every status is now set by hand, so
+    the flag means nothing. Idempotent: skipped once the column is gone.
     """
     conn = get_conn()
-    cols = [row["name"] for row in conn.execute("PRAGMA table_info(members)").fetchall()]
-    if "edipi" in cols and "edipi_hash" not in cols:
-        conn.execute("ALTER TABLE members RENAME COLUMN edipi TO edipi_hash")
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(presence)")}
+    if "manual" in cols:
+        conn.execute("ALTER TABLE presence DROP COLUMN manual")
         conn.commit()
 
-    stale = [
-        r for r in conn.execute("SELECT id, edipi_hash FROM members")
-        if _PLAINTEXT_EDIPI.match(r["edipi_hash"])
-    ]
-    if not stale:
-        return
-    for r in stale:
-        conn.execute(
-            "UPDATE members SET edipi_hash = ? WHERE id = ?",
-            (identity.hash_edipi(r["edipi_hash"]), r["id"]),
-        )
-    conn.commit()
-    # An UPDATE leaves the old page content in the freelist, so the plaintext
-    # can outlive the rows that held it; VACUUM rewrites the file without it.
-    # One-time - this whole branch is skipped once nothing is stale.
-    conn.execute("VACUUM")
-    log.info("Hashed %d plaintext EDIPI(s) in the members table", len(stale))
 
-
-def _warn_if_roster_key_lost():
+def _migrate_members_by_name():
     """
-    Having had to *generate* the roster key is unremarkable on a first run and
-    a disaster on an existing one: hashes written with the old key can never
-    match a tap hashed with the new one, so every member quietly stops being
-    recognised while the board still looks fine. Nothing can recover that
-    automatically - the point is only that it says so rather than presenting
-    as an empty lab. Rows still holding plaintext don't count: those are a
-    pre-hashing install being upgraded, which is the normal path.
+    Installs from when members were identified by CAC keyed `members` on a
+    hashed EDIPI (`edipi_hash`, or a plaintext `edipi` before that). Rebuild
+    the table keyed on display_name instead, keeping every surviving row's id
+    so presence rows stay attached to the right person, then VACUUM so the
+    hashes don't survive in the freelist.
 
-    Two shapes of the same mistake, because a fresh clone has no rows yet:
-    hashes already in the database, and hashes already in members.json.
+    display_name was not unique back then - a member re-added under a new
+    hash left an inactive row with the same name behind. For each name the
+    active row wins (else the newest), and the presence rows of the others
+    are dropped with them.
 
-    Pending placeholders are excluded from both counts. They were not made by
-    any key, so they say nothing about whether this one is the right one, and
-    counting them would raise this alarm over a roster that has simply not been
-    given its EDIPIs yet.
+    Foreign keys are switched off for the swap, because dropping `members`
+    with them on would try to cascade into presence. Runs at import time,
+    before any request thread exists, so nothing else is writing. Idempotent:
+    keyed on whether the old column is still there.
     """
-    identity.load_key()
-    if not identity.key_was_generated:
-        return
-
     conn = get_conn()
-    hashed = [
-        r for r in conn.execute("SELECT edipi_hash FROM members")
-        if not _PLAINTEXT_EDIPI.match(r["edipi_hash"])
-        and not identity.is_pending(r["edipi_hash"])
-    ]
-    if hashed:
-        log.error(
-            "%d member(s) were hashed with a different roster key than the one "
-            "at %s, which was just generated fresh - no card will be recognised. "
-            "Restore the old key file from backup, or re-add everyone with "
-            "scripts/add-member.py.",
-            len(hashed),
-            identity.KEY_PATH,
-        )
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(members)")}
+    if "edipi_hash" not in cols and "edipi" not in cols:
         return
 
-    # A fresh install has no rows to compare a new key against, so the check
-    # above sees nothing - but config/members.json arrives from git already
-    # full of hashes made on whatever machine those people were added on, and
-    # a key generated here cannot reproduce them. That combination is the
-    # quietest failure this system has: the roster syncs, the board shows
-    # everyone, and every single tap comes back "Card not recognized".
+    rows = conn.execute(
+        "SELECT id, display_name, active FROM members ORDER BY active DESC, id DESC"
+    ).fetchall()
+    keep, drop = {}, []
+    for r in rows:
+        name = r["display_name"].strip()
+        if name in keep:
+            drop.append(r["id"])
+        else:
+            keep[name] = r
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
     try:
-        entries = json.loads(MEMBERS_CONFIG.read_text()).get("members", [])
-    except (OSError, ValueError):
-        return  # a missing or unparseable roster is sync's problem, not this one
-    prehashed = [
-        m for m in entries
-        if m.get("edipi_hash") and not identity.is_pending(m["edipi_hash"])
-    ]
-    if prehashed:
-        log.error(
-            "%s lists %d member(s) already hashed, but the roster key at %s was "
-            "just generated here - it cannot match hashes made elsewhere, so the "
-            "board will look right and no card will be recognised. Copy over the "
-            "key those hashes were made with (it is gitignored, so it never "
-            "arrives with a clone), or re-add everyone with "
-            "scripts/add-member.py.",
-            MEMBERS_CONFIG,
-            len(prehashed),
-            identity.KEY_PATH,
+        conn.execute("BEGIN")
+        conn.execute(
+            """
+            CREATE TABLE members_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT UNIQUE NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            )
+            """
         )
-
-
-def _entry_hash(entry: dict, name: str) -> str:
-    """
-    A roster entry identifies someone by edipi_hash. Two hand-edited shapes
-    are accepted as well, both with a WARNING naming the person, because a
-    half-finished edit shouldn't silently drop somebody off the board and it
-    certainly shouldn't stop the app from starting - this runs from init_db()
-    at import time, so anything raised here takes the whole board down.
-
-    A plaintext `edipi` is hashed on the fly, but it means the number is
-    sitting in the config file, so say so until it gets converted. An entry
-    with neither field is someone whose EDIPI hasn't arrived yet, and becomes
-    a pending placeholder - see identity.pending_hash() and
-    scripts/add-member.py --pending, which is the deliberate way to do this.
-    """
-    if entry.get("edipi_hash"):
-        return str(entry["edipi_hash"]).strip()
-    if not entry.get("edipi"):
-        log.warning(
-            "%s lists %s with no edipi_hash, so they are on the board as a "
-            "pending member: they can be checked in by clicking their name, "
-            "but no card will match them. Finish the entry with "
-            "scripts/add-member.py --replace \"%s\" once you have their EDIPI.",
-            MEMBERS_CONFIG,
-            name,
-            name,
+        conn.executemany(
+            "INSERT INTO members_new (id, display_name, active) VALUES (?, ?, ?)",
+            [(r["id"], name, r["active"]) for name, r in keep.items()],
         )
-        return identity.pending_hash(name)
-    log.warning(
-        "%s lists a plaintext EDIPI for %s. It works, but the number is stored "
-        "in the clear - run scripts/add-member.py to replace that entry with an "
-        "edipi_hash.",
-        MEMBERS_CONFIG,
-        name,
+        conn.executemany("DELETE FROM presence WHERE member_id = ?", [(i,) for i in drop])
+        conn.execute("DROP TABLE members")
+        conn.execute("ALTER TABLE members_new RENAME TO members")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("VACUUM")
+    log.info(
+        "Rebuilt members keyed by name (CAC identifiers removed); kept %d, merged away %d",
+        len(keep), len(drop),
     )
-    return identity.hash_edipi(entry["edipi"])
+
+
+def _roster_names(entries) -> list[str]:
+    """
+    Names from config/members.json's "members" list. Each entry is a plain
+    string; an object with a "display_name" (the old CAC-era shape, whose
+    edipi_hash is simply ignored now) is accepted too, so an un-updated file
+    still loads. Blanks and repeats are skipped rather than raised: this runs
+    from init_db() at import time, and a typo must not take the board down.
+    """
+    names, seen = [], set()
+    for entry in entries:
+        name = entry.get("display_name") if isinstance(entry, dict) else entry
+        name = str(name or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def sync_members_from_config():
     """
-    Reconcile the members table with config/members.json: add new people,
-    update renamed ones, and deactivate anyone no longer listed. Safe to
-    call repeatedly - it runs on every startup.
+    Reconcile the members table with config/members.json: add new people and
+    deactivate anyone no longer listed. Safe to call repeatedly - it runs on
+    every startup.
 
     Members are deactivated, never deleted. Their presence row references
     members.id with a foreign key, so deleting the member would fail; and
     re-adding someone flips the same row back to active rather than creating
     a second one. get_roster_status() filters on active, so this is all it
     takes for someone to disappear from the kiosk and the dashboard.
+
+    Identity is the name, so renaming someone in the file reads as one person
+    leaving and another joining - the new name starts out as 'out'.
     """
     if not MEMBERS_CONFIG.exists():
         return
     data = json.loads(MEMBERS_CONFIG.read_text())
-    entries = data.get("members", [])
+    names = _roster_names(data.get("members", []))
     conn = get_conn()
 
     before = {
-        r["edipi_hash"]: r
-        for r in conn.execute("SELECT edipi_hash, display_name, active FROM members")
+        r["display_name"]: r["active"]
+        for r in conn.execute("SELECT display_name, active FROM members")
     }
 
-    config_hashes = set()
     added, reactivated = [], []
-    for m in entries:
-        name = m["display_name"].strip()
-        edipi_hash = _entry_hash(m, name)
-        config_hashes.add(edipi_hash)
-        previous = before.get(edipi_hash)
-        if previous is None:
+    for name in names:
+        if name not in before:
             added.append(name)
-        elif not previous["active"]:
+        elif not before[name]:
             reactivated.append(name)
         conn.execute(
             """
-            INSERT INTO members (edipi_hash, display_name, active)
-            VALUES (?, ?, 1)
-            ON CONFLICT(edipi_hash) DO UPDATE SET
-                display_name = excluded.display_name,
-                active = 1
+            INSERT INTO members (display_name, active) VALUES (?, 1)
+            ON CONFLICT(display_name) DO UPDATE SET active = 1
             """,
-            (edipi_hash, name),
+            (name,),
         )
 
     # A roster that reads as empty is far more likely to be a broken edit -
     # a stray comma, a half-saved file, the wrong key name - than a lab with
     # nobody in it. Deactivating everyone on that basis would blank the board
     # and take a restart to undo, so treat it as bad input and change nothing.
-    if not config_hashes:
+    if not names:
         log.warning(
             "%s lists no members, so no one was deactivated - check the file "
             "if this wasn't deliberate. The existing roster is unchanged.",
@@ -336,34 +276,24 @@ def sync_members_from_config():
         conn.commit()
         return
 
-    placeholders = ",".join("?" * len(config_hashes))
-    params = tuple(config_hashes)
+    placeholders = ",".join("?" * len(names))
     removed = [
         r["display_name"]
         for r in conn.execute(
             f"SELECT display_name FROM members "
-            f"WHERE active = 1 AND edipi_hash NOT IN ({placeholders})",
-            params,
+            f"WHERE active = 1 AND display_name NOT IN ({placeholders})",
+            names,
         )
     ]
     if removed:
         conn.execute(
-            f"UPDATE members SET active = 0 WHERE edipi_hash NOT IN ({placeholders})", params
+            f"UPDATE members SET active = 0 WHERE display_name NOT IN ({placeholders})", names
         )
     conn.commit()
 
-    for label, names in (("added", added), ("reactivated", reactivated), ("deactivated", removed)):
-        if names:
-            log.info("Roster sync %s %d member(s): %s", label, len(names), ", ".join(names))
-
-
-def get_member_by_hash(edipi_hash: str):
-    """Look a member up by identity.hash_edipi(edipi) - see app._handle_tap()."""
-    conn = get_conn()
-    row = conn.execute(
-        "SELECT * FROM members WHERE edipi_hash = ? AND active = 1", (edipi_hash,)
-    ).fetchone()
-    return dict(row) if row else None
+    for label, changed in (("added", added), ("reactivated", reactivated), ("deactivated", removed)):
+        if changed:
+            log.info("Roster sync %s %d member(s): %s", label, len(changed), ", ".join(changed))
 
 
 def current_status(member_id: int) -> str:
@@ -375,15 +305,14 @@ def current_status(member_id: int) -> str:
     return row["status"] if row else "out"
 
 
-def set_status(member_id: int, action: str, location: str | None = None,
-               manual: bool = False) -> dict:
+def set_status(member_id: int, action: str, location: str | None = None) -> dict:
     """
     Sets where a member is and returns what changed as a dict: {member_id,
-    display_name, action, previous, change_id, location, manual}. `previous`
-    is the status this replaced, which is what lets the kiosk say "Back in
-    lab" rather than "Checked in" for a return from away. change_id
-    identifies this change, so the optional checkout note that follows can be
-    attached to it via set_note() and to nothing later.
+    display_name, action, previous, change_id, location}. `previous` is the
+    status this replaced, which is what lets the kiosk say "Back in lab"
+    rather than "Checked in" for a return from away. change_id identifies
+    this change, so the optional checkout note that follows can be attached
+    to it via set_note() and to nothing later.
 
     Overwrites the member's one presence row - nothing is appended, and no
     time is recorded.
@@ -391,10 +320,6 @@ def set_status(member_id: int, action: str, location: str | None = None,
     `location` is where an 'away' member went, stored in the row's `note`
     column - the same column a checkout comment lands in, since both are the
     one line of free text a status can carry. It is ignored for 'in'.
-
-    manual=True records that no card was involved - the kiosk's click-a-name
-    path and /api/manual-toggle. Nothing else distinguishes the two, and the
-    board says so beside the person's name (see get_roster_status).
 
     Raises ValueError for an unknown member or action, and for a change that
     would say nothing new ('in' while in, 'out' while out): the caller is
@@ -420,9 +345,9 @@ def set_status(member_id: int, action: str, location: str | None = None,
         "SELECT COALESCE(MAX(change_id), 0) + 1 FROM presence"
     ).fetchone()[0]
     conn.execute(
-        "INSERT OR REPLACE INTO presence (member_id, status, note, manual, change_id) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (member_id, action, location, 1 if manual else 0, change_id),
+        "INSERT OR REPLACE INTO presence (member_id, status, note, change_id) "
+        "VALUES (?, ?, ?, ?)",
+        (member_id, action, location, change_id),
     )
     conn.commit()
 
@@ -433,19 +358,19 @@ def set_status(member_id: int, action: str, location: str | None = None,
         "previous": previous,
         "change_id": change_id,
         "location": location,
-        "manual": bool(manual),
     }
 
 
-def toggle_status(member_id: int, manual: bool = False) -> dict:
+def toggle_status(member_id: int) -> dict:
     """
     Flips a member between present and not: in -> out, and out *or away* ->
     in. Returns what set_status() does. This is the no-questions-asked path
-    (the dev loop's curl, the network fallback); anything that wants to say
-    where someone went calls set_status() with 'away' and a location.
+    (the dev loop's curl, a check-in from another machine); anything that
+    wants to say where someone went calls set_status() with 'away' and a
+    location.
     """
     action = "out" if current_status(member_id) == "in" else "in"
-    return set_status(member_id, action, manual=manual)
+    return set_status(member_id, action)
 
 
 def set_note(change_id: int, note: str | None):
@@ -476,9 +401,8 @@ def reset_if_new_day() -> int:
     self-reboot leaves statuses alone while a Pi that was off overnight still
     starts clean. Called at startup and by a once-a-minute thread in app.py.
 
-    Yesterday's notes ("at lunch") and NO CARD marks go too, on everyone -
-    they described a moment that is over. Rows keep their change_id, so the
-    board's order is undisturbed.
+    Yesterday's notes ("at lunch") go too, on everyone - they described a
+    moment that is over.
 
     The very first run (no date stored yet - a fresh install, or the upgrade
     from the old events log) only records today: it must not wipe statuses
@@ -492,8 +416,8 @@ def reset_if_new_day() -> int:
     count = 0
     if row:
         count = conn.execute(
-            "UPDATE presence SET status = 'out', note = NULL, manual = 0 "
-            "WHERE status != 'out' OR note IS NOT NULL OR manual != 0"
+            "UPDATE presence SET status = 'out', note = NULL "
+            "WHERE status != 'out' OR note IS NOT NULL"
         ).rowcount
     conn.execute(
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_reset', ?)", (today,)
@@ -508,17 +432,18 @@ def get_roster_status():
     """
     All active members with their current status, for the kiosk/dashboard.
 
-    Most recently changed first, so the newest check-in/out lands leftmost on
-    the board - ordered by change_id, a counter, not a time. Members who have
-    never set a status sort last, alphabetically among themselves.
+    Alphabetical, and deliberately stable: the kiosk is driven with arrow
+    keys, so people learn where their card sits on the strip ("three to the
+    right"), and a card that moved whenever its status changed would break
+    that - and drag the keyboard highlight along with it.
     """
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT m.id, m.display_name, p.status, p.note, p.manual
+        SELECT m.id, m.display_name, p.status, p.note
         FROM members m LEFT JOIN presence p ON p.member_id = m.id
         WHERE m.active = 1
-        ORDER BY COALESCE(p.change_id, 0) DESC, m.display_name
+        ORDER BY m.display_name COLLATE NOCASE
         """
     ).fetchall()
     return [
@@ -529,11 +454,6 @@ def get_roster_status():
             # A checkout comment or an away location; never shown on an 'in'
             # (set_status already clears it there - this is belt and braces).
             "note": r["note"] if r["status"] in ("out", "away") else None,
-            # Whether what put them in this state was a click rather than a
-            # tap. Unlike the note, this applies to both directions: an
-            # unverified check-*in* is the half worth flagging, since nobody's
-            # card was ever present for it.
-            "manual": bool(r["manual"]),
         }
         for r in rows
     ]

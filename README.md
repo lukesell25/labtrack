@@ -1,44 +1,42 @@
 # LabTrack
 
 A small Flask app for your Raspberry Pi that:
-- Identifies lab members by tapping their DoD CAC on a USB smart card reader (no PIN)
 - Shows who's in the lab, who's away on campus (the server room, a lecture
   hall), and who's out (lunch, gone home) - current status only. It is not a
   timesheet: no check-in times are recorded or shown anywhere, and everyone
   is reset to out once a day
+- Lets people check themselves in and out from a keyboard in front of the
+  board: arrow keys to pick a name, Enter to check in or out (a mouse works
+  too)
 - Shows a live status board / screensaver on the Pi's own screen
 - Serves a read-only "who's here" dashboard viewable from any other PC on
   the network
 
+There's no card reader and no login: anyone at the board can set anyone's
+status, like a whiteboard. (It used to identify people by CAC tap; that was
+removed.)
+
 ## Developing locally, away from the Pi
 
-`scripts/setup.sh` is the **Pi deployment installer** - it installs
-`pcscd`/`opensc` (talks to the physical card reader) and a kiosk-mode
-Chromium, and installs systemd services. None of that is relevant on a
-regular dev machine (Windows, WSL, Mac, whatever you're running Claude
-Code on), and trying to run it there will just fail on hardware-only
-packages like `pyscard` that need a real smart card reader driver stack to
-even compile against.
-
-For editing and testing the Flask app, dashboard, kiosk display, or
-database logic without the Pi, use the lean dependency set instead:
+`scripts/setup.sh` is the **Pi deployment installer** - it installs a
+kiosk-mode Chromium, ffmpeg and systemd services, and none of that belongs on
+a regular dev machine. For editing and testing the app on Windows, WSL, a Mac
+or anything else:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate        # or venv\Scripts\activate on Windows
-pip install -r requirements-dev.txt
+pip install -r requirements.txt
 python3 app.py
 ```
 
-This runs the full app minus actual CAC hardware support -
-`cac_reader.py` detects that `pyscard` isn't installed and logs a single
-warning instead of crashing, so every route still works. Click a name on
-the kiosk page to check that person in or out (see "Checking in without a
-card" below), or drive the same thing from another terminal (or
-curl/Postman):
+Then open `http://localhost:5000` (kiosk display) and
+`http://localhost:5000/dashboard` in a browser. Drive the kiosk exactly as
+people will on the Pi - arrow keys and Enter, see "Checking in" below - or
+change a status from another terminal (or curl/Postman):
 
 ```bash
-curl -X POST http://localhost:5000/api/manual-toggle \
+curl -X POST http://localhost:5000/api/set-status \
      -H "Content-Type: application/json" \
      -d '{"member_id": 1}'
 ```
@@ -47,21 +45,7 @@ Each call toggles that member, so run it twice to exercise both the
 check-in toast and the checkout note prompt. Add `"action"` (`in`, `away` or
 `out`) and, for away, `"location"` to record something specific rather than a
 toggle - `{"member_id": 1, "action": "away", "location": "Server room"}`
-puts them on the board as away. Note that statuses written this way are
-flagged as manual and show a "No card" mark on the board - that is the real
-behaviour, not a dev-mode artifact, so it is not a pixel-perfect stand-in
-for a tap.
-
-There is no way to simulate the *question* a tap asks (see "Stepping away"
-below) without a reader: that path starts in the CAC monitor thread. The
-same dialog opens from a click on the roster strip, minus the countdown.
-
-Then open `http://localhost:5000` (kiosk display) and
-`http://localhost:5000/dashboard` in a browser to see your changes.
-
-When you're ready to test against the real reader, deploy to the Pi as
-usual - `requirements.txt` there includes `pyscard` and `python-pkcs11`
-for the actual hardware path.
+puts them on the board as away.
 
 ## Project layout
 
@@ -69,9 +53,7 @@ for the actual hardware path.
 labtrack/
   app.py                  Flask app + routes
   database.py              SQLite schema + queries
-  cac_reader.py             Background thread that watches the card reader
-  config/members.json       Hashed EDIPI -> name roster (scripts/add-member.py)
-  config/roster.key         Secret salt for those hashes - back this up, never commit it
+  config/members.json       The roster: a list of names (edit, then restart)
   config/objectives.json    Screensaver text content (edit any time)
   config/locations.json     Preset "away" places for the leaving dialog (edit any time)
   config/decode-mode        hardware|software video decode (scripts/set-decode.sh)
@@ -79,14 +61,12 @@ labtrack/
   static/                   CSS, JS, and a media/ folder for slide pictures
                             and the background video
   health.py                 Once-a-minute health heartbeat for long runs
+  webauth.py                The shared password for the dashboard from other PCs
   systemd/labtrack.service   Runs the app on boot
   systemd/labtrack-reboot.*  Timer + unit for the nightly 00:00 reboot
-  systemd/*.rules            polkit rules: card reader access, and reboot
+  systemd/*.rules            polkit rule letting the app reboot the Pi
   autostart/*.desktop       Launches Chromium kiosk mode on desktop login
-  identity.py               One-way hashing of EDIPIs for the roster
   scripts/setup.sh          Installs everything below in one go
-  scripts/add-member.py     Adds a member without their EDIPI hitting disk
-                            (--pending for one you don't have an EDIPI for yet)
   scripts/soak-report.sh    Summarises a long unattended run
   scripts/build-loop.sh     Builds the long-playing background video (run on the Pi)
   scripts/set-decode.sh     Switches the kiosk between hardware/software decode
@@ -94,7 +74,7 @@ labtrack/
 
 ## Step-by-step setup on the Pi
 
-These steps assume a fresh Raspberry Pi OS (64-bit, Desktop) install, keyboard/mouse
+These steps assume a fresh Raspberry Pi OS (64-bit, Desktop) install, keyboard
 attached, connected to your network.
 
 ### 1. Get the project onto the Pi
@@ -112,7 +92,7 @@ chmod +x scripts/setup.sh
 ./scripts/setup.sh
 ```
 
-This installs `pcscd`/`opensc`/`chromium-browser`, creates a Python virtual
+This installs `chromium-browser` and `ffmpeg`, creates a Python virtual
 environment, installs the pip requirements, installs and enables the
 `labtrack` systemd service, installs the kiosk autostart entry, and enables
 desktop auto-login via `raspi-config`.
@@ -121,214 +101,68 @@ You'll be prompted for your sudo password partway through.
 
 ### 3. Fill in your roster
 
-Add each lab member with their name and the 10-digit EDIPI printed on the
-front of their CAC:
+`config/members.json` is a list of names, exactly as they should appear on
+the board:
 
-```bash
-python3 scripts/add-member.py "Ada Vance"
+```json
+{
+  "members": ["Ada Vance", "Grace Hopper"]
+}
 ```
 
-It asks for the EDIPI twice, without echoing it, and writes only a hash of it
-to `config/members.json` — the number itself is never stored, not in the file,
-not in the database, not in the journal. Because it asks rather than taking an
-argument, the EDIPI also stays out of your shell history. Restart to pick it
-up:
+Restart to pick up a change:
 
 ```bash
 sudo systemctl restart labtrack
 ```
 
-Since the hash is one-way there is no way to check a typo afterwards — a wrong
-digit just means the card is never recognised — which is why it prompts twice.
-If that happens, delete the entry and add the person again.
-
-**The hashing key.** The hashes are salted with `config/roster.key`, generated
-automatically the first time the app or `add-member.py` runs and readable only
-by its owner. **Back it up somewhere off the Pi.** Hashes are meaningless
-without the key that made them: lose it and every card stops matching and the
-whole roster has to be re-added. The app says so on startup rather than
-quietly failing:
-
-```
-ERROR labtrack.db: 5 member(s) were hashed with a different roster key than the one at ...
-```
-
-The same applies to a **fresh clone**: `config/members.json` comes down from
-git already full of hashes, but the key that made them is gitignored and does
-not. Copy the key into `config/` *before* the app first starts, or you get the
-quietest failure this system has — the roster syncs, the board shows everyone,
-and every tap comes back "Card not recognized". Startup says so:
-
-```
-ERROR labtrack.db: config/members.json lists 5 member(s) already hashed, but the roster key at ... was just generated here
-```
-
-**Which machine owns the key.** Whichever one the roster was built on holds
-the key those hashes belong to, and the Pi needs that same file to recognise
-those cards — copying it across once, as part of deploying, is the intended
-path. Keeping the production key on a laptop afterwards is not: a dev machine
-away from the Pi should generate its own key and hash a throwaway roster of
-made-up numbers. Hashes are not portable between the two.
+The strip along the bottom of the kiosk is alphabetical and doesn't move
+around, so people quickly learn where their name is.
 
 **Adding and removing people.** The file is the source of truth: anyone added
 appears on the board after a restart, and anyone removed disappears from the
-kiosk and the dashboard and their card stops being recognised. Their member
-row is retired rather than deleted, so adding the same EDIPI back returns
-them on the same row. The restart logs what changed:
+kiosk and the dashboard. Their row is retired rather than deleted, so adding
+the same name back returns them on the same row. The restart logs what
+changed:
 
 ```
 INFO labtrack.db: Roster sync deactivated 1 member(s): Ada Vance
 ```
 
-Note the roster is keyed on the **hashed EDIPI**, not on name or position in
-the file — so reordering the list or fixing a spelling is safe, but re-adding
-someone with a different EDIPI reads as "one person left, a different one
-joined".
+The roster is keyed on the **name**, so fixing a spelling reads as "one
+person left, a different one joined" - harmless, since the only thing lost is
+their current status, which starts over as "out".
 
-**Someone whose EDIPI you don't have yet.** A new member, a card that hasn't
-been issued, or the stretch before the reader is installed at all - put them
-on the board now and fill the number in later:
+### 4. Plug in a keyboard
 
-```bash
-python3 scripts/add-member.py --pending "Ada Vance"
+Any USB keyboard in front of the board. It is how people check in and out,
+so leave it there. A mouse is optional - clicking a name does the same thing
+as selecting it with the keys - and the pointer hides itself after a few
+seconds of stillness so it doesn't sit on the display all day.
+
+### 5. Try a check-in end to end
+
+On the kiosk: press → to highlight the first name, Enter to open it, Enter
+again to check in. The board shows the confirmation and the name turns
+green. Do it again for the same person to see the leaving dialog - Check
+out, or one of the away places - and the optional note prompt after a
+checkout. The header of the board spells the keys out for anyone new
+("← → choose your name · Enter check in / out"); see "Checking in" below for
+the whole flow.
+
+### 6. Pick your away places
+
+The leaving dialog offers preset places for "still at work, elsewhere",
+from `config/locations.json`:
+
+```json
+{
+  "locations": ["Server room", "Lecture hall"]
+}
 ```
 
-That asks for nothing and writes a placeholder where the hash goes
-(`pending-ada-vance`). After a restart Ada is a full member: she appears on
-the kiosk strip and the dashboard, she can be checked in and out by clicking
-her name (see "Checking in without a card" below), and those changes are
-flagged `manual` and marked `NO CARD` exactly like anyone else's click-in. No
-card can ever match her, because a real hash is 32 hex characters and the
-placeholder deliberately isn't one.
-
-Adding the name by hand with no `edipi_hash` field at all does the same thing
-rather than failing - the roster sync runs at startup, so a half-finished edit
-that raised would take the whole board down. Every restart names the person
-until it's finished:
-
-```
-WARNING labtrack.db: config/members.json lists Ada Vance with no edipi_hash, so they are on the board as a pending member ...
-```
-
-**Filling in a pending member's EDIPI.** When the number turns up:
-
-```bash
-python3 scripts/add-member.py --replace "Ada Vance"
-```
-
-It prompts for the EDIPI the same way (twice, not echoed), replaces the
-placeholder in `config/members.json`, and - the part that matters - rewrites
-that same row in `labtrack.db` instead of adding a second one.
-
-**Don't do this swap by editing the file alone.** The roster is keyed on the
-hashed EDIPI, so changing the hash reads as *one person leaving and a
-different one joining*: the restart adds a new row and deactivates the old
-one, which keeps her current status - so she drops back to "out" on the board.
-
-```
-id 1  pending-ada-vance   Ada Vance  active 0   <- owns her status
-id 2  aaaabbbb...         Ada Vance  active 1   <- fresh, out
-```
-
-**When the key and the database are on different machines.** The hash has to
-be made where `config/roster.key` lives, which often isn't the Pi holding
-`labtrack.db`. `--replace` says so and prints the one command that finishes
-the job, to be run on the Pi *before* restarting - the restart is what would
-create that second row:
-
-```bash
-sqlite3 labtrack.db "UPDATE members SET edipi_hash = '<the new hash>' WHERE edipi_hash = 'pending-ada-vance';"
-```
-
-Copy the updated `config/members.json` across as well, then restart. Ada's
-next tap is recognised and the `NO CARD` mark clears with it.
-
-A hand-edited entry with a plaintext `"edipi": "1234567890"` still works, so a
-half-finished edit can't silently drop somebody off the board, but it defeats
-the point and every startup will say so until it's converted:
-
-```
-WARNING labtrack.db: config/members.json lists a plaintext EDIPI for Ada Vance ...
-```
-
-### 4. Plug in the smart card reader and test it
-
-```bash
-pcsc_scan
-```
-
-Tap a CAC on the reader. You should see the tool print reader/card details
-and an ATR (Answer To Reset) string change when the card is presented and
-removed. If nothing happens here, stop and troubleshoot at this level first
-(check `lsusb` sees the reader, check `systemctl status pcscd`) before
-worrying about the app — everything else depends on this working.
-
-Once the app is running, the same check is on the board itself: the kiosk
-header shows a green "Reader ready" beside the clock while a reader is
-attached, and a red "Reader offline" if it is unplugged or `pcscd` has
-died. That state is also in the journal — but only when it changes:
-
-```bash
-journalctl -u labtrack | grep -i "card reader"
-```
-
-### 5. Check where OpenSC's PKCS#11 module actually landed
-
-```bash
-find / -name "opensc-pkcs11.so" 2>/dev/null
-```
-
-`setup.sh` already tries this and tells you, but architectures/OS versions
-vary. Open `cac_reader.py` and make sure `PKCS11_MODULE_PATH` at the top
-matches what you found. Restart the service after any change:
-
-```bash
-sudo systemctl restart labtrack
-```
-
-### 6. Verify a real tap works end-to-end
-
-```bash
-sudo journalctl -u labtrack -f
-```
-
-Tap a registered CAC on the reader. You should see a log line like
-`Member Name checked in at 2026-...`.
-
-**If you see `EstablishContextException: ... Access denied. (0x8010006A)`:**
-this is polkit, not the app. Since pcsc-lite 2.0.1, `pcscd` on
-Debian/Ubuntu only authorizes clients with an active interactive login
-session by default — a systemd service like `labtrack` doesn't have one,
-so it gets rejected. Fix it with a polkit rule authorizing the service
-user explicitly:
-
-```bash
-sudo cp systemd/40-labtrack-pcscd.rules /etc/polkit-1/rules.d/40-labtrack-pcscd.rules
-sudo systemctl restart polkit
-sudo systemctl restart labtrack
-```
-
-(`setup.sh` installs this automatically on a fresh run — this is only
-needed if you set the project up before this rule existed.)
-
-If you instead see "Unrecognized card" or "could not extract an EDIPI," the certificate on that particular card
-layout may store the EDIPI slightly differently — run:
-
-```bash
-./venv/bin/python -c "
-import pkcs11
-lib = pkcs11.lib('/usr/lib/aarch64-linux-gnu/opensc-pkcs11.so')  # match cac_reader.py's path
-for slot in lib.get_slots(token_present=True):
-    print(slot.get_token())
-"
-```
-
-or more simply `pkcs15-tool --list-certificates` / `pkcs15-tool --read-certificate 1`
-(also installed by `opensc`) to inspect exactly what's on the card, and adjust
-the extraction logic in `cac_reader.py` (`_extract_edipi_from_cert`) to match.
-This is the one part of the project most likely to need a small tweak for
-your specific card stock — I've implemented the standard PIV field plus a CN
-fallback, but issuance details vary.
+Edit the list any time; the kiosk re-reads it within a minute, no restart.
+"Other…" is always offered as well, for anything not on the list.
 
 ### 7. Add screensaver content
 
@@ -463,9 +297,9 @@ optional looping background video.
   forever, at the cost of far more CPU than the kiosk can spare in
   production.
 
-  The video also stays visible behind the check-in/check-out confirmation
-  and the "reading card" overlay, dimmed to the same level as behind a
-  slide, so the board never cuts to a flat panel mid-tap.
+  The video also stays visible behind the check-in dialog and
+  confirmation, dimmed to the same level as behind a slide, so the board
+  never cuts to a flat panel mid-check-in.
 
   H.264 at exactly 1920x1080 is both the panel's native resolution and
   inside the Pi 4's hardware decode ceiling (1920x1920); HEVC/VP9/AV1 or
@@ -535,8 +369,8 @@ sudo cp autostart/99-labtrack-password-store /etc/chromium.d/99-labtrack-passwor
 sudo reboot
 ```
 
-Tapping a CAC should show a full-screen confirmation, then fade back to the
-status board/screensaver.
+Checking someone in from the keyboard (→, Enter, Enter) should show a
+full-screen confirmation, then fade back to the status board/screensaver.
 
 **If Chromium still can't reach the internet / still prompts for a
 keyring even after the fix above:** the real cause is almost certainly
@@ -591,7 +425,7 @@ gitignored, and it is per-Pi.
 
 The kiosk itself is never prompted: requests from the Pi are exempt, so the
 board keeps working through all of this. Everything from off the Pi needs
-the password, including `/api/manual-toggle` - without that, anyone on the
+the password, including `/api/set-status` - without that, anyone on the
 lab network could check people in and out.
 
 **This is a lock on the door, not an encrypted tunnel.** There is no HTTPS
@@ -615,68 +449,41 @@ a lecture hall. A typical day reads in → away (server room) → in → out
 (lunch) → in → away (lecture hall) → in → out. The board just says where
 the person is now - never since when.
 
-**Tapping while in asks a question.** A tap from someone who is out (or
-away) simply checks them in - they are standing at the lab's reader. A tap
-from someone who is *in* means they are leaving, but not where to, so
-instead of writing anything the board asks: **Check out**, or one of the
-preset places under "Still at work, elsewhere" (**Server room**, **Lecture
-hall**, ...), or **Other...** to type one. Click one with the mouse. If
-nobody chooses within 20 seconds the server records a plain checkout - the
-same thing a tap used to mean - so walking off without answering still
-records the tap, and it does so even if the kiosk browser has died.
+Leaving asks where to: the dialog for someone who is in offers **Check
+out**, or one of the preset places under "Still at work, elsewhere"
+(**Server room**, **Lecture hall**, ... - see "6. Pick your away places"),
+or **Other...** to type one. Wherever they went is shown under the person's
+name on the board and the dashboard, in blue with a hollow ring so "away" is
+never mistaken for "in" from across the room. Selecting someone who is away
+offers **Back in lab** or **Check out**.
 
-The preset places come from `config/locations.json`:
+## Checking in
 
-```json
-{
-  "locations": ["Server room", "Lecture hall"]
-}
-```
+Everything is done from the keyboard in front of the board (a mouse works
+too). The top of the board says how: **← → choose your name · Enter check
+in / out**.
 
-Edit the list any time; the kiosk re-reads it within a minute, no restart.
-Wherever they went is shown under the person's name on the board and the
-dashboard, in blue with a hollow ring so
-"away" is never mistaken for "in" from across the room. Clicking the name of
-someone who is away offers **Back in lab** or **Check out**.
+1. Press ← or → to highlight your name on the strip along the bottom. The
+   first press lands on the first (→) or last (←) name; Home and End jump to
+   the ends. The highlight clears itself after 30 seconds, or on Escape.
+2. Press **Enter**. The board asks, with the likeliest answer already
+   selected: someone out gets **Check in**; someone in gets **Check out**
+   plus the away places; someone away gets **Back in lab**.
+3. Press **Enter** again to confirm - or use the arrow keys to pick a
+   different button first. **Escape** cancels, and so does walking away:
+   the dialog closes itself after 20 seconds, so a stray keypress never
+   changes anything by itself.
 
-## Checking in without a card
+So the everyday case is three keys: arrow to your name, Enter, Enter.
 
-Tapping a CAC is the normal path. When that isn't possible - the reader is
-down, someone left their card at home, or the reader hasn't been installed
-yet - a member can check themselves in or out from the kiosk itself:
+After a checkout the board offers an optional one-line note ("at lunch,
+back at 14:00") - type it and press Enter twice to save, or Escape to skip.
+The note shows under your name until you're back.
 
-1. Move the mouse. The kiosk hides the pointer after 8 seconds of stillness
-   (an always-on board shouldn't have a cursor parked on it for a week), so
-   it reappears as soon as the mouse does.
-2. Click your name in the roster strip along the bottom of the screen.
-3. The board asks. Someone who is out gets **Check in**; someone who is in
-   gets **Check out** and the "still at work, elsewhere" places (see
-   "Stepping away" above); someone away gets **Back in lab** or **Check
-   out**. Cancel is always there, the dialog cancels itself after 20
-   seconds, and clicking anywhere outside the buttons cancels it too, so a
-   stray click never changes anything by itself.
-
-From there it behaves exactly like a tap: the same confirmation, and the
-same optional "why are you out" note prompt on a checkout.
-
-**Anything set this way is marked.** The status carries a `manual` flag in
-the database, and the kiosk and dashboard show an amber `NO CARD` under that
-person's name until their next tap (or the daily reset). Nothing verified a card, so nothing
-pretends one was read - the whole point of tapping a CAC is that the entry
-means something, and an entry anybody could have clicked has to be legible
-as such.
-
-For a **pending member** - someone on the roster with no EDIPI yet, added
-with `add-member.py --pending` (see "3. Fill in your roster") - this isn't a
-fallback, it's the only way in until their number arrives. Every change they
-make stays marked `NO CARD`; the mark clears on their first real tap once the
-EDIPI is filled in with `--replace`.
-
-A mouse has to be plugged into the Pi for any of this, which is also the
-thing that makes it a fallback rather than the front door: no mouse, no
-click-in. The `/api/manual-toggle` endpoint underneath it is the same one
-described under "Day-to-day maintenance" below, so a member can also be
-toggled from another machine on the network.
+With a mouse, click your name instead of steps 1-2, then click a button.
+The pointer hides itself after 8 seconds of stillness, so it doesn't sit on
+the display all day. Status can also be changed from another machine on the
+network - see "Day-to-day maintenance" below.
 
 ## Watching a long run
 
@@ -726,7 +533,6 @@ obviously related:
 | App errors, tracebacks (never who checked in - see "No time tracking" in CLAUDE.md) | `app.py` | `journalctl -u labtrack` |
 | Health heartbeat, once a minute | `health.py` | `journalctl -u labtrack \| grep health` |
 | Errors the kiosk page saw | `report()` in `main.js` → `/api/client-log` | `journalctl -u labtrack \| grep client` |
-| Card reader plugged/unplugged | `start_reader_watch()` in `cac_reader.py` | `journalctl -u labtrack \| grep -i "card reader"` |
 | Chromium's own output, and which decode path it launched with | the `logger` pipe in `autostart/labwc-autostart` | `journalctl -t labtrack-chromium` |
 | OOM kills, undervoltage, resets | the kernel | `journalctl -k` |
 
@@ -990,7 +796,7 @@ sudo systemctl restart labtrack-reboot.timer
 Turn it off with `sudo systemctl disable --now labtrack-reboot.timer`.
 
 Separately from the reboot, the app resets everyone to **out** once a day,
-clearing notes and `NO CARD` marks too: with no time on anybody's card, a
+clearing notes too: with no time on anybody's card, a
 forgotten checkout would otherwise say "In lab" forever. It keys on the date
 rather than on the reboot, so it happens just after midnight whether or not
 the timer is enabled, a Pi that was off overnight still starts the day
@@ -1009,12 +815,10 @@ clean, and a restart or self-reboot during the day changes nothing.
   wedging, and it is not tracked in git so it must be rebuilt on the Pi)
 - **If the video misbehaves:** `scripts/set-decode.sh software && sudo reboot`
   (see "Switching video decode")
-- **Manually toggle someone in/out** (if the reader is down, or for testing)
-  without touching the card reader. From the kiosk itself this is a click on
-  the person's name - see "Checking in without a card" above - and over the
-  network it's the same endpoint that click posts to:
+- **Change someone's status from another machine** (or for testing) -
+  the same endpoint the kiosk dialog posts to:
   ```bash
-  curl -X POST http://localhost:5000/api/manual-toggle \
+  curl -X POST http://<pi-ip>:5000/api/set-status -u :<dashboard password> \
        -H "Content-Type: application/json" \
        -d '{"member_id": 1}'
   ```
@@ -1022,39 +826,9 @@ clean, and a restart or self-reboot during the day changes nothing.
   add `"action"` - `in`, `away` or `out` - and for away a `"location"`:
   `'{"member_id": 1, "action": "away", "location": "Server room"}'`. An
   action that changes nothing (`in` while already in) is refused with a 409.
-  Either way the status is flagged as manual and shows a "No card" mark on
-  the board and the dashboard until that person's next tap.
-  (member IDs are assigned in the order they appear in `config/members.json`,
-  starting at 1 — check `/api/state` to confirm which id maps to whom.)
-- **Add someone before you have their EDIPI**, then fill it in later without
-  splitting them into two member rows:
-  ```bash
-  python3 scripts/add-member.py --pending "Ada Vance"   # on the board now
-  python3 scripts/add-member.py --replace "Ada Vance"   # when the number arrives
-  ```
-  Until `--replace`, they check in by clicking their name on the kiosk and
-  every change is marked `NO CARD`. `--replace` rewrites their existing member
-  row rather than adding a second one - see "3. Fill in your roster" above for
-  why hand-editing the hash in `config/members.json` instead splits them in
-  two. Both need a restart to take effect.
+  Check `/api/state` to see which id maps to whom.
+- **Add or remove someone:** edit the list of names in
+  `config/members.json`, then restart the app (see "3. Fill in your
+  roster").
 - **Database** lives at `labtrack.db` in the project folder (plain SQLite —
   `sqlite3 labtrack.db` to poke at it directly if needed).
-
-## A note on the CAC integration
-
-The roster stores `scrypt(EDIPI, salt=config/roster.key)` rather than the
-EDIPI, so a tap is identified by hashing the card's EDIPI and matching. Ten
-digits is a small enough keyspace that a plain SHA-256 would be brute-forced
-in minutes, and an HMAC would be too as soon as the key file leaked next to
-the roster it protects; scrypt's work factor puts a full sweep at decades of
-CPU time even for someone holding the key. It costs ~100-200ms per tap, on the
-reader thread, inside the 1-3s the certificate read already takes. Note this
-protects the ID numbers, not the names, which are still in the file.
-
-Reading is limited to what's available *without* PIN entry — the PIV
-Authentication certificate, which is a public object and readable by design.
-This is enough to uniquely identify who tapped (via the EDIPI embedded in
-the cert) but does **not** cryptographically prove the person physically
-possesses the card's private key the way a PIN-backed challenge would. For a
-5-person lab status board that's a reasonable tradeoff, but it's worth
-being clear-eyed that this is identification, not full authentication.

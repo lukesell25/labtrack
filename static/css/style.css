@@ -98,92 +98,44 @@ body.kiosk.is-confirm {
   letter-spacing: 0.14em;
 }
 
-.reading-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 55;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 1.5rem;
-  background: var(--graphite-900);
-  display: none;
-}
-
-.reading-overlay.is-visible {
-  display: flex;
-}
-
-.reading-overlay__dot {
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--phosphor);
-  animation: reading-pulse 1s ease-in-out infinite;
-}
-
-.reading-overlay__text {
-  font-family: var(--mono);
-  font-size: 1.6rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--phosphor);
-}
-
-@keyframes reading-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-/* Right-hand end of the kiosk header: reader indicator, then the clock. */
+/* Right-hand end of the kiosk header: keyboard hint, then the clock. */
 .board__meta {
   display: flex;
   align-items: baseline;
   gap: 1.75rem;
 }
 
-/* Card-reader presence. Flat colour only, and deliberately not animated:
-   this sits on screen permanently, and a blinking dot would cost the Pi a
-   repaint forever (see Performance in CLAUDE.md). The dot is a
-   pseudo-element rather than a child so the line's baseline stays the
-   label's, which is what keeps it level with the clock beside it. */
-.board__reader {
+/* How to check in - the one instruction on the board, so it is full
+   brightness and sized to read from standing distance in front of it (the
+   slide text is still far larger, so it doesn't compete). Static text -
+   nothing here ever repaints. */
+.board__keys {
   font-family: var(--mono);
-  font-size: 1rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 1.4rem;
+  letter-spacing: 0.04em;
+  color: var(--text-hi);
+}
+
+.board__keys-sep {
+  margin: 0 0.5em;
   color: var(--text-low);
-  --reader-dot: var(--text-low);
 }
 
-.board__reader::before {
-  content: "";
+/* Key caps, wherever the kiosk names a key (header, dialog, note prompt).
+   A flat border, no shadow - see Performance in CLAUDE.md. */
+kbd {
   display: inline-block;
-  width: 0.62em;
-  height: 0.62em;
-  margin-right: 0.5em;
-  border-radius: 50%;
-  background: var(--reader-dot);
-}
-
-/* Working: quiet. The dot carries the state, the label stays dim so a
-   healthy board has nothing shouting at the top of it. */
-.board__reader.is-ok {
-  --reader-dot: var(--phosphor);
-}
-
-/* No reader, or PC/SC unreachable - nobody can check in, so this one is
-   meant to be readable from across the room. */
-.board__reader.is-down {
-  --reader-dot: var(--danger);
-  color: var(--danger);
-}
-
-/* Nothing is checking (no pyscard, or the checks went stale). Not known to
-   be broken, so amber rather than red - but not claimed to be working. */
-.board__reader.is-unknown {
-  --reader-dot: var(--amber);
-  color: var(--amber);
+  min-width: 1.6em;
+  padding: 0.05em 0.4em;
+  margin: 0 0.12em;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--graphite-800);
+  color: var(--text-hi);
+  font-family: var(--mono);
+  font-size: 0.9em;
+  line-height: 1.3;
+  text-align: center;
 }
 
 .board__clock {
@@ -231,7 +183,7 @@ body.kiosk.is-confirm {
   display: none;
 }
 
-/* Flagged on <body>, not on .media: the toast and reading overlays live
+/* Flagged on <body>, not on .media: the toast and dialog overlays live
    outside the panel and need to know whether there's a video to reveal. */
 body.has-bg .media__bg,
 body.has-bg .media__scrim {
@@ -346,8 +298,8 @@ body.has-bg .media__scrim {
   display: flex;
   align-items: center;
   gap: 1rem;
-  /* The kiosk renders each card as a <button> (click your name to check in
-     without a card); the dashboard still renders plain divs. These four undo
+  /* The kiosk renders each card as a <button> (select your name to check
+     in); the dashboard still renders plain divs. These four undo
      the UA button styling so both come out identical - without them the kiosk
      strip picks up a native border, centred small system text and a grey
      face. Harmless on the dashboard's divs. */
@@ -393,10 +345,9 @@ body.has-bg .media__scrim {
   padding: 0.9rem 1.5rem;
 }
 
-/* Click feedback for the no-card check-in path. Gated on has-pointer so the
-   card doesn't light up under a cursor that isn't being shown, and a flat
-   background swap rather than anything that rasterizes (Performance above).
-   Focus is an outline, not a box-shadow, for the same reason. */
+/* Click feedback for mouse users. Gated on has-pointer so the card doesn't
+   light up under a cursor that isn't being shown, and a flat background swap
+   rather than anything that rasterizes (Performance above). */
 body.kiosk.has-pointer .roster__card {
   cursor: pointer;
 }
@@ -405,9 +356,21 @@ body.kiosk.has-pointer .roster__card:hover {
   background: var(--graphite-700);
 }
 
-.kiosk .roster__card:focus-visible {
-  outline: 2px solid var(--amber);
-  outline-offset: -2px;
+/* The keyboard highlight (arrow keys - see "keyboard" in main.js). A class
+   rather than :focus so it survives the strip being re-rendered. An inset
+   outline plus a flat background: neither changes the card's box, so the
+   pinned strip height above is untouched, and neither rasterizes a blur
+   the way a box-shadow glow would. White rather than a status colour, so it
+   reads as "selected" on an in, away or out card alike. Browser focus rings
+   on the cards are suppressed: the highlight is the one selection marker. */
+.kiosk .roster__card.is-highlighted {
+  outline: 3px solid var(--text-hi);
+  outline-offset: -3px;
+  background: var(--graphite-700);
+}
+
+.kiosk .roster__card:focus:not(.is-highlighted) {
+  outline: none;
 }
 
 .kiosk .roster__ring {
@@ -420,8 +383,8 @@ body.kiosk.has-pointer .roster__card:hover {
 }
 
 .kiosk .roster__status {
-  /* Sized when this line also carried the time of the last tap; it is just
-     the status word now, so it has room to spare at 1.1rem. */
+  /* Sized when this line also carried a check-in time; it is just the
+     status word now, so it has room to spare at 1.1rem. */
   font-size: 1.1rem;
   /* The name and the note are both nowrap+ellipsis, and so is this: any line
      that can wrap once the cards get narrow silently adds ~20px to every card
@@ -493,19 +456,6 @@ body.kiosk.has-pointer .roster__card:hover {
   text-overflow: ellipsis;
 }
 
-/* Shares the note line rather than taking one of its own - the card's height
-   is pinned to three lines, and a manual checkout can carry both. Amber and
-   monospaced to read as a machine-made mark, not as something the person
-   typed; upright because .roster__note is italic. */
-.roster__nocard {
-  font-family: var(--mono);
-  font-style: normal;
-  font-size: 0.9em;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--amber);
-}
-
 /* ---- toast (check-in/out confirmation) --------------------------- */
 .toast {
   position: fixed;
@@ -548,14 +498,6 @@ body.kiosk.has-pointer .roster__card:hover {
   color: var(--danger);
 }
 
-.toast__hint {
-  font-family: var(--mono);
-  font-size: 0.9rem;
-  letter-spacing: 0.04em;
-  color: var(--text-low);
-  margin-top: 0.25rem;
-}
-
 .toast.is-error .toast__action {
   color: var(--danger);
 }
@@ -567,6 +509,12 @@ body.kiosk.has-pointer .roster__card:hover {
   gap: 0.85rem;
   margin-top: 1.5rem;
   width: min(90vw, 480px);
+}
+
+.toast__note-hint {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  color: var(--text-low);
 }
 
 .toast__note-input {
@@ -613,15 +561,15 @@ body.kiosk.has-pointer .roster__card:hover {
   outline-offset: 1px;
 }
 
-/* :focus-visible, unlike the note prompt's plain :focus above. The dialog
-   focuses Cancel as it opens, and painting an amber ring on it there puts a
-   second amber-outlined button next to the amber Confirm - it reads as the
-   selected one. Chromium only matches :focus-visible on a programmatic focus
-   when the last input was a keyboard, which is exactly when the ring is
-   wanted; a mouse user gets the two buttons as designed. */
-.confirm__btn:focus-visible {
-  outline: 2px solid var(--amber);
-  outline-offset: 1px;
+/* Plain :focus, not :focus-visible: the dialog focuses its likeliest action
+   as it opens, and Enter fires whatever is focused - so the ring has to show
+   even when the dialog was opened with a mouse click. White, matching the
+   roster highlight, so "selected" looks the same everywhere and never gets
+   lost against an amber or green button border. */
+.confirm__btn:focus {
+  outline: 3px solid var(--text-hi);
+  outline-offset: 2px;
+  background: var(--graphite-700);
 }
 
 /* Each action button carries the colour its state has everywhere else on
@@ -643,11 +591,9 @@ body.kiosk.has-pointer .roster__card:hover {
   color: var(--away);
 }
 
-/* ---- click-to-toggle confirmation -------------------------------- */
-/* Same full-screen treatment as the toast, and deliberately between the two
-   other overlays in the stack: above the reading overlay (a card presented
-   mid-dialog is the more important thing to say) and below the toast that
-   supersedes it. */
+/* ---- check-in / leaving dialog ---------------------------------- */
+/* Same full-screen treatment as the toast, and below it in the stack: the
+   toast is what the dialog turns into once a choice is made. */
 .confirm {
   position: fixed;
   inset: 0;
@@ -700,8 +646,8 @@ body.kiosk.has-pointer .roster__card:hover {
   margin-top: 1.75rem;
 }
 
-/* Bigger than the note prompt's buttons: those are typed at from arm's
-   length after a tap, these are mouse targets on a wall-mounted panel. */
+/* Bigger than the note prompt's buttons: these are read from standing
+   distance while choosing with the arrow keys (or a mouse). */
 .confirm__btn {
   font-size: 1.05rem;
   padding: 0.8rem 1.75rem;
@@ -764,7 +710,7 @@ body.kiosk.has-pointer .roster__card:hover {
 }
 
 /* ---- reboot notice ----------------------------------------------- */
-/* Top of the overlay stack (55 reading / 58 confirm / 60 toast): the display
+/* Top of the overlay stack (58 confirm / 60 toast): the display
    is about to go away, which outranks anything else on screen. Flat fill and
    no animation, same as the others - this sits on a panel whose compositor is
    already in trouble, so it must not ask the GPU for anything. */
@@ -807,14 +753,13 @@ body.kiosk.has-pointer .roster__card:hover {
 /* ---- dashboard --------------------------------------------------- */
 /* ---- overlays over the background video -------------------------- */
 /* With a video configured, the confirmation overlays dim it instead of
-   covering it, so the board keeps moving while someone taps in. Gated on
+   covering it, so the board keeps moving while someone checks in. Gated on
    has-bg rather than applied unconditionally: with no video there is nothing
    to reveal, and a fully opaque overlay lets the compositor skip painting
    the whole board underneath (Performance above). The cost only applies
-   while an overlay is actually up - 4s per tap, or 15s for a note prompt. */
+   while an overlay is actually up - 4s per check-in, or 15s for a note prompt. */
 body.has-bg .toast,
 body.has-bg .confirm,
-body.has-bg .reading-overlay,
 body.has-bg .reboot {
   background: rgba(14, 17, 22, 0.72);
 }

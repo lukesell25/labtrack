@@ -9,9 +9,7 @@ from flask import Flask, Response, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 import database as db
-import identity
 import webauth
-from cac_reader import get_reader_presence, start_cac_monitor, start_reader_watch
 from health import start_health_monitor, sample as health_sample, uptime_s
 
 # Deliberately no timestamp in the format: in production every line goes to
@@ -25,7 +23,7 @@ app = Flask(__name__)
 
 OBJECTIVES_PATH = Path(__file__).parent / "config" / "objectives.json"
 # Where an 'away' member can say they went. Preset buttons on the kiosk, so
-# the choice works with a mouse and no keyboard; "Other" falls back to typing.
+# the common places are one keypress or click; "Other" falls back to typing.
 LOCATIONS_PATH = Path(__file__).parent / "config" / "locations.json"
 STATIC_MEDIA = Path(__file__).parent / "static" / "media"
 
@@ -41,16 +39,11 @@ STATIC_MEDIA = Path(__file__).parent / "static" / "media"
 # here; set this to () for no background at all.
 BACKGROUND_VIDEO_CANDIDATES = ("background-long.mp4", "background.mp4")
 
-# Last check-in/out event, shared between the CAC-reader thread and the
-# Flask request threads. The frontend polls /api/state and compares
-# last_event's id to know when to pop the confirmation toast.
+# Last check-in/out event, shared between Flask request threads. The
+# frontend polls /api/state and compares last_event's id to know when to pop
+# the confirmation toast.
 _state_lock = threading.Lock()
 _last_event = {"id": 0}
-
-# Whether a card is currently mid-read (between physical insertion and the
-# PKCS#11 read finishing, roughly 1-3 seconds). Lets the kiosk show "reading
-# card..." instead of leaving the person wondering if the tap registered.
-_reader_status = {"reading": False}
 
 # When the kiosk page last polled /api/state. The kiosk browser is the one
 # part of this system that can die without anything on this end erroring -
@@ -60,34 +53,11 @@ _reader_status = {"reading": False}
 # must not be able to mask a dead kiosk.
 _kiosk_status = {"last_poll": None}
 
-# A tap by someone who is *in* is ambiguous - are they leaving for the day,
-# or for the server room? - so it is not written until they say. This holds
-# the one unanswered tap: the kiosk sees it on /api/state, puts the question
-# on screen, and answers through /api/tap-choice. If nobody answers within
-# TAP_CHOICE_TIMEOUT_S the server records a checkout itself, which is what a
-# tap meant before there was a question to ask; the deadline lives here, not
-# in the page, so a tap is recorded even if the kiosk browser is dead.
-# `id` is 0 when nothing is pending. Guarded by _state_lock like the rest.
-TAP_CHOICE_TIMEOUT_S = 20
-_pending_tap = {"id": 0, "member_id": None, "display_name": None, "deadline": 0.0}
 
-UNRECOGNIZED_MESSAGES = {
-    "unreadable": "Could not read card",
-    "no_edipi": "Card not recognized",
-    "error": "Card read error",
-}
-
-
-def _set_reading(active: bool):
-    with _state_lock:
-        _reader_status["reading"] = active
-
-
-def _push_event(display_name, action, message=None, change_id=None, manual=False,
-                previous=None, location=None):
+def _push_event(display_name, action, change_id=None, previous=None, location=None):
     """
     Publishes an event for the kiosk to pick up on its next /api/state poll.
-    Returns a snapshot of what it published, which is what /api/manual-toggle
+    Returns a snapshot of what it published, which is what /api/set-status
     reports back to its caller. In memory only, and carries no time - the
     toast says who and what, never when.
     """
@@ -101,174 +71,13 @@ def _push_event(display_name, action, message=None, change_id=None, manual=False
         # names the place off the second.
         _last_event["previous"] = previous
         _last_event["location"] = location
-        if message:
-            _last_event["message"] = message
-        else:
-            _last_event.pop("message", None)
         # Which status change this was, so a checkout's optional note can be
         # attached to it (POST /api/presence/<change_id>/note) and nothing later.
         if change_id is not None:
             _last_event["change_id"] = change_id
         else:
             _last_event.pop("change_id", None)
-        # Whether this happened without a card. The toast says so instead of
-        # "you may remove your card now", which would be nonsense for a click.
-        _last_event["manual"] = bool(manual)
         return dict(_last_event)
-
-
-def _handle_card_detected():
-    """Called from the CAC monitor thread the instant a card is physically inserted."""
-    _set_reading(True)
-
-
-def _handle_unrecognized(reason: str):
-    """Called from the CAC monitor thread if a presented card can't be read/identified."""
-    _set_reading(False)
-    _push_event(None, "error", UNRECOGNIZED_MESSAGES.get(reason, "Card not recognized"))
-
-
-def _handle_tap(edipi: str):
-    """Called from the CAC monitor thread whenever a card is identified."""
-    # The EDIPI itself is never stored or logged - only its hash, which is
-    # what the roster is keyed on. The prefix is enough to tell repeat taps of
-    # the same unknown card apart in the journal, which is persistent for a
-    # month (see scripts/setup.sh), without putting a DoD ID in it.
-    edipi_hash = identity.hash_edipi(edipi)
-    member = db.get_member_by_hash(edipi_hash)
-    if member is None:
-        log.warning("Unrecognized card tapped (hash %s not in roster)", edipi_hash[:8])
-        _set_reading(False)
-        _push_event(None, "error", "Card not recognized")
-        return
-
-    # A tap by someone who is in means they are leaving - but not whether for
-    # the day or for the server room, so ask rather than guess. Everyone else
-    # is standing at the lab's reader, which answers the question by itself:
-    # they are in the lab.
-    if db.current_status(member["id"]) == "in":
-        _set_reading(False)
-        _open_tap_choice(member)
-        return
-
-    # Deliberately not logged: the journal is timestamped and kept for a
-    # month, so a line per check-in would be the timesheet this app no longer
-    # keeps. See "No time tracking" in CLAUDE.md.
-    event = db.set_status(member["id"], "in")
-    _set_reading(False)
-    _push_event(
-        event["display_name"],
-        event["action"],
-        change_id=event["change_id"],
-        manual=False,
-        previous=event["previous"],
-        location=event["location"],
-    )
-
-
-# --- the tap question --------------------------------------------------
-
-def _open_tap_choice(member):
-    """
-    Park a tap from a member who is in until the kiosk says what it meant.
-    Any earlier unanswered tap is a different person who walked off without
-    choosing: it gets its default (a checkout) now rather than later, so there
-    is only ever one question on the board. The same person tapping again
-    just restarts their clock.
-    """
-    with _state_lock:
-        if _pending_tap["id"] and _pending_tap["member_id"] == member["id"]:
-            _pending_tap["deadline"] = time.monotonic() + TAP_CHOICE_TIMEOUT_S
-            tap_id = _pending_tap["id"]
-        else:
-            tap_id = None
-    if tap_id is not None:
-        _arm_tap_timeout(tap_id)
-        return
-
-    _resolve_tap(None, "out", timed_out=True)   # whoever was pending, if anyone
-
-    with _state_lock:
-        _pending_tap["id"] += 1
-        tap_id = _pending_tap["id"]
-        _pending_tap.update(
-            member_id=member["id"],
-            display_name=member["display_name"],
-            deadline=time.monotonic() + TAP_CHOICE_TIMEOUT_S,
-        )
-    _arm_tap_timeout(tap_id)
-
-
-def _arm_tap_timeout(tap_id):
-    # A stale timer is harmless: _resolve_tap() checks the id and the
-    # deadline, so a re-tap that pushed the deadline out just makes the first
-    # timer a no-op and the second one the real one.
-    timer = threading.Timer(TAP_CHOICE_TIMEOUT_S, _resolve_tap, args=(tap_id, "out"),
-                            kwargs={"timed_out": True})
-    timer.daemon = True
-    timer.start()
-
-
-def _take_pending_tap(tap_id=None, member_id=None):
-    """
-    Claim the pending tap and clear the slot, or None if there isn't one (or
-    it isn't the one asked for, by id or by member). Atomic, so a choice and
-    a timeout arriving together resolve it exactly once.
-    """
-    with _state_lock:
-        if not _pending_tap["id"]:
-            return None
-        if tap_id is not None and _pending_tap["id"] != tap_id:
-            return None
-        if member_id is not None and _pending_tap["member_id"] != member_id:
-            return None
-        taken = dict(_pending_tap)
-        _pending_tap.update(id=0, member_id=None, display_name=None, deadline=0.0)
-        return taken
-
-
-def _resolve_tap(tap_id, action, location=None, timed_out=False):
-    """
-    Write the event a parked tap turns out to have meant, and publish it.
-    Returns the published event, or None if there was nothing to resolve.
-    With timed_out the caller is a timer or a superseding tap, and only a tap
-    whose deadline has actually passed (or no id at all) is taken - a timer
-    from before a re-tap must not fire early.
-    """
-    if timed_out and tap_id is not None:
-        with _state_lock:
-            if _pending_tap["id"] != tap_id or time.monotonic() < _pending_tap["deadline"]:
-                return None
-    taken = _take_pending_tap(tap_id)
-    if taken is None:
-        return None
-    try:
-        event = db.set_status(taken["member_id"], action, location=location)
-    except ValueError:
-        # Their status changed under the question (a manual toggle from the
-        # dashboard, say) and the answer no longer applies. Nothing to write.
-        return None
-    return _push_event(
-        event["display_name"],
-        event["action"],
-        change_id=event["change_id"],
-        manual=False,
-        previous=event["previous"],
-        location=event["location"],
-    )
-
-
-def _pending_tap_view():
-    """What /api/state tells the kiosk, or None when no tap is waiting."""
-    with _state_lock:
-        if not _pending_tap["id"]:
-            return None
-        return {
-            "id": _pending_tap["id"],
-            "member_id": _pending_tap["member_id"],
-            "display_name": _pending_tap["display_name"],
-            "expires_in_s": max(0, round(_pending_tap["deadline"] - time.monotonic())),
-        }
 
 
 def _background_video():
@@ -401,7 +210,7 @@ def _require_dashboard_password():
     kiosk browser is on the Pi and is exempt - it runs unattended and cannot
     answer a prompt.
 
-    This guards the API as much as the page: /api/manual-toggle can check
+    This guards the API as much as the page: /api/set-status can check
     anybody in or out, and the app listens on the whole lab network.
     """
     if webauth.is_local(request.remote_addr):
@@ -443,22 +252,10 @@ def api_state():
         if from_kiosk:
             _kiosk_status["last_poll"] = time.monotonic()
         last_event = dict(_last_event)
-        reading = _reader_status["reading"]
     return jsonify(
         {
             "roster": db.get_roster_status(),
             "last_event": last_event,
-            "reading": reading,
-            # Sampled on a timer in cac_reader, not measured here - see
-            # get_reader_presence(). This endpoint is hit several times a
-            # second across the kiosk and every open dashboard, so it must
-            # not talk to pcscd itself.
-            "reader": get_reader_presence(),
-            # A tap waiting on "leaving, or stepping away?" - the kiosk puts
-            # the question up while this is non-null and takes it down when
-            # it isn't, so the board's dialog follows the server's state
-            # rather than its own memory of it.
-            "pending_tap": _pending_tap_view(),
             # null except in the seconds between something deciding the board
             # is unrecoverable and the reboot actually happening, so the
             # kiosk can put a countdown on screen rather than blinking out.
@@ -484,32 +281,6 @@ def api_locations():
     return jsonify({"locations": names})
 
 
-@app.route("/api/tap-choice", methods=["POST"])
-def api_tap_choice():
-    """
-    The kiosk's answer to a parked tap: {"tap_id", "action": "away"|"out",
-    "location"?}. The id must match the tap currently pending, so an answer
-    to a question that has already timed out (or been superseded by someone
-    else's tap) writes nothing - the checkout the timeout recorded stands,
-    and a 409 tells the page so. The event is not flagged manual: a card was
-    read, this is just the second half of the same tap.
-    """
-    payload = request.json or {}
-    action = payload.get("action")
-    if action not in ("away", "out"):
-        return jsonify({"error": 'action must be "away" or "out"'}), 400
-    location = payload.get("location")
-    location = location.strip()[:80] if isinstance(location, str) else None
-    try:
-        tap_id = int(payload.get("tap_id"))
-    except (TypeError, ValueError):
-        return jsonify({"error": "tap_id required"}), 400
-    pushed = _resolve_tap(tap_id, action, location=location)
-    if pushed is None:
-        return jsonify({"error": "no such pending tap"}), 409
-    return jsonify(pushed)
-
-
 @app.route("/api/presence/<int:change_id>/note", methods=["POST"])
 def api_set_note(change_id):
     """
@@ -523,29 +294,24 @@ def api_set_note(change_id):
     return jsonify({"ok": True})
 
 
-@app.route("/api/manual-toggle", methods=["POST"])
-def api_manual_toggle():
+@app.route("/api/set-status", methods=["POST"])
+def api_set_status():
     """
-    Record an event for a member without a card tap. Three callers: the
-    kiosk's click-a-name flow (tapping the roster card, then choosing), the
-    dashboard/curl fallback for when the reader is down, and dev machines
-    with no reader at all.
+    Check a member in, out, or away. Callers: the kiosk's dialog (arrow keys
+    or a click on a roster card, then a choice), curl from another machine,
+    and the dev loop.
 
     {"member_id": 1} alone toggles - in -> out, out or away -> in - which is
-    what the dev loop and the curl fallback want. Add "action" ("in", "away"
-    or "out") to say exactly what to record, and "location" with "away" to say
-    where; that is what the kiosk dialog posts. An action that changes
-    nothing ("in" while already in) is a 409 - the caller's view is stale.
-
-    Every event written here is flagged manual, because none of them saw a
-    card - the board and the log say so beside the person's name so an
-    unverified check-in is never mistaken for a tap.
+    what the dev loop and curl want. Add "action" ("in", "away" or "out") to
+    say exactly what to record, and "location" with "away" to say where; that
+    is what the kiosk dialog posts. An action that changes nothing ("in"
+    while already in) is a 409 - the caller's view is stale.
 
     The response is the event exactly as /api/state would report it, id
     included. The kiosk still re-polls rather than toasting from this reply
     (one path to the screen for every event, whatever caused it - see
     submitChoice() in main.js); it's here for curl and for anything that
-    wants to know what the toggle actually did.
+    wants to know what the change actually did.
     """
     payload = request.json or {}
     member_id = payload.get("member_id")
@@ -558,18 +324,14 @@ def api_manual_toggle():
     location = location.strip()[:80] if isinstance(location, str) else None
     try:
         member_id = int(member_id)
-        # If a tap of theirs is waiting on the question, this is the answer:
-        # claim it before writing, so a timeout can't land in between and
-        # record a checkout on top.
-        _take_pending_tap(member_id=member_id)
         if action is None:
-            event = db.toggle_status(member_id, manual=True)
+            event = db.toggle_status(member_id)
         else:
-            event = db.set_status(member_id, action, location=location, manual=True)
+            event = db.set_status(member_id, action, location=location)
     except (TypeError, ValueError) as e:
         if action is not None and str(e).startswith("Already"):
             # The page that posted this is showing a stale status - somebody
-            # tapped in between. Its next poll will straighten it out.
+            # else changed it in between. Its next poll will straighten it out.
             return jsonify({"error": str(e).lower()}), 409
         # An unknown or non-numeric member_id: a stale kiosk page holding ids
         # from before a roster change, not a server fault, so don't 500 it.
@@ -578,7 +340,6 @@ def api_manual_toggle():
         event["display_name"],
         event["action"],
         change_id=event["change_id"],
-        manual=True,
         previous=event["previous"],
         location=event["location"],
     )
@@ -661,31 +422,6 @@ def handle_unexpected_error(e):
     return jsonify({"error": "internal error"}), 500
 
 
-# Keep references at module scope so the monitor/observer aren't GC'd.
-_cac_monitor = None
-_cac_observer = None
-
-
-def _init_cac_monitor():
-    global _cac_monitor, _cac_observer
-    try:
-        _cac_monitor, _cac_observer = start_cac_monitor(
-            _handle_tap,
-            on_card_detected=_handle_card_detected,
-            on_unrecognized=_handle_unrecognized,
-        )
-    except RuntimeError as e:
-        # Expected on a dev machine without pyscard installed - see
-        # cac_reader.py's _PYSCARD_AVAILABLE check. No traceback needed for
-        # something this routine.
-        log.warning(str(e))
-    except Exception:
-        log.exception(
-            "Failed to start CAC monitor - is a reader plugged in and pcscd running? "
-            "The app will keep running; use /api/manual-toggle in the meantime."
-        )
-
-
 def _start_daily_reset():
     """
     Everyone in or away goes back to out once per calendar day (see
@@ -711,10 +447,6 @@ _start_daily_reset()
 # the file exists and its one-time warning lands at boot rather than
 # whenever the first request from another PC happens to arrive.
 webauth.load_password()
-_init_cac_monitor()
-# Deliberately started even when _init_cac_monitor() failed: a Pi with no
-# working monitor is exactly when the board needs to say the reader is down.
-start_reader_watch()
 start_health_monitor(kiosk_idle_fn=_kiosk_idle_s)
 
 

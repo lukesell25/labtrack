@@ -8,23 +8,17 @@ if [ "$(basename "$PWD")" != "labtrack" ]; then
   exit 1
 fi
 
-echo "==> Installing system packages (smart card + browser + python venv)"
+echo "==> Installing system packages (browser + python venv)"
 sudo apt update
 # ffmpeg is for scripts/build-loop.sh, which builds the long-playing
 # background video from the short master tracked in git (see below).
 sudo apt install -y \
-  pcscd pcsc-tools opensc libpcsclite-dev swig \
-  python3-venv python3-dev \
+  python3-venv \
   chromium-browser ffmpeg
 
-echo "==> Enabling pcscd (smart card daemon)"
-sudo systemctl enable --now pcscd
-
-echo "==> Installing polkit rules for the service user (no interactive login session)"
-# pcscd: without this, pcsc-lite >= 2.0.1 rejects the service as a non-session
-# client. reboot: lets app.py recover the board from a wedged display, which
+echo "==> Installing the polkit rule for the service user (no interactive login session)"
+# Lets app.py reboot the Pi to recover the board from a wedged display, which
 # nothing in userspace can otherwise undo - see request_reboot() in app.py.
-sudo cp systemd/40-labtrack-pcscd.rules /etc/polkit-1/rules.d/40-labtrack-pcscd.rules
 sudo cp systemd/40-labtrack-reboot.rules /etc/polkit-1/rules.d/40-labtrack-reboot.rules
 sudo systemctl restart polkit
 
@@ -32,15 +26,6 @@ echo "==> Creating Python virtual environment"
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r requirements.txt
-
-echo "==> Locating opensc-pkcs11.so so cac_reader.py points at the right path"
-FOUND_MODULE=$(find / -name "opensc-pkcs11.so" 2>/dev/null | head -n 1 || true)
-if [ -n "$FOUND_MODULE" ]; then
-  echo "    Found: $FOUND_MODULE"
-  echo "    Update PKCS11_MODULE_PATH in cac_reader.py to this path if it differs."
-else
-  echo "    WARNING: opensc-pkcs11.so not found. Check the opensc package installed correctly."
-fi
 
 echo "==> Making the systemd journal persistent across reboots"
 # Raspberry Pi OS defaults to Storage=auto with no /var/log/journal, which
@@ -97,11 +82,10 @@ sudo raspi-config nonint do_boot_behavior B4
 
 echo ""
 echo "Setup complete. Next steps:"
-echo "  1. Add each lab member:  python3 scripts/add-member.py \"Their Name\""
-echo "     (it asks for the EDIPI and stores only a hash of it)"
-echo "     Then back up config/roster.key off the Pi - without it no card matches."
-echo "  2. Plug in the USB smart card reader, then run: pcsc_scan"
-echo "     (tap a CAC and confirm the reader + card are detected before trusting the app)"
+echo "  1. List each lab member's name in config/members.json, then restart:"
+echo "     sudo systemctl restart labtrack"
+echo "  2. Plug a USB keyboard into the Pi - it is how people check in and out"
+echo "     (arrow keys to pick a name, Enter to check in/out)."
 echo "  3. To view the dashboard from another PC, note the password:"
 echo "     cat config/dashboard.key    (generated on first start; blank username)"
 echo "     Replace it with a passphrase of your own if you prefer, then restart."

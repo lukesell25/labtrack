@@ -2,7 +2,7 @@ const POLL_MS = 5000;
 
 // renderRoster() rebuilds the section with innerHTML, which costs a layout +
 // paint of the whole section. The data behind it only changes when someone
-// taps a card, so most 5s refreshes have nothing new to draw -
+// checks in or out, so most 5s refreshes have nothing new to draw -
 // skipIfUnchanged() lets those bail out before touching the DOM.
 const lastRendered = {};
 function skipIfUnchanged(key, data) {
@@ -24,12 +24,6 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// "No card" is the mark left by the kiosk's click-to-toggle path (and by
-// /api/manual-toggle generally): the person was recorded without a card
-// being read. Same wording and colour as the kiosk board, since it means the
-// same thing in both places.
-const NO_CARD = '<span class="roster__nocard">No card</span>';
-
 // Labels per status, matching the kiosk (main.js). The note line carries a
 // checkout comment or, for away, the location - the server puts whichever
 // applies in `note`.
@@ -39,11 +33,8 @@ function statusClass(status) {
   return status === "in" ? "is-in" : status === "away" ? "is-away" : "";
 }
 
-function noteLine(manual, note) {
-  const parts = [];
-  if (manual) parts.push(NO_CARD);
-  if (note) parts.push(escapeHtml(note));
-  return parts.length ? `<div class="roster__note">${parts.join(" · ")}</div>` : "";
+function noteLine(note) {
+  return note ? `<div class="roster__note">${escapeHtml(note)}</div>` : "";
 }
 
 function renderRoster(roster) {
@@ -55,7 +46,7 @@ function renderRoster(roster) {
       <div class="roster__meta">
         <div class="roster__name">${escapeHtml(m.display_name)}</div>
         <div class="roster__status">${STATUS_LABELS[m.status] || escapeHtml(m.status)}</div>
-        ${noteLine(m.manual, m.note)}
+        ${noteLine(m.note)}
       </div>
     </div>
   `).join("");

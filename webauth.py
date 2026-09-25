@@ -3,7 +3,7 @@ webauth.py - the shared password that guards LabTrack from other machines.
 
 The app binds to every interface so the dashboard can be read from a PC on
 the lab network (see README "View the dashboard from another PC"). That also
-puts /api/manual-toggle within reach of anyone on that network, who could
+puts /api/set-status within reach of anyone on that network, who could
 otherwise check people in and out at will, so everything off-box is behind a
 password.
 
@@ -26,11 +26,11 @@ Two things worth knowing:
   whole network - if that ever happens, this has to start reading a
   proxy-set header instead.
 
-- **The password is stored in the clear, and deliberately not hashed.** The
-  obvious move is to reuse identity.hash_edipi, but scrypt costs 100-200ms on
-  a Pi 4 and dashboard.js polls three endpoints every 5s, so each open
-  dashboard would spend ~120ms of every second hashing on a Flask request
-  thread - the exact thing CLAUDE.md rules out. secrets.compare_digest
+- **The password is stored in the clear, and deliberately not hashed.** A
+  slow hash like scrypt costs 100-200ms on a Pi 4, and the password is checked
+  on every request - dashboard.js polls every 5s - so each open dashboard
+  would spend a real share of every second hashing on a Flask request
+  thread, the kind of cost CLAUDE.md rules out. secrets.compare_digest
   against the plaintext is microseconds and still constant-time. The file is
   mode 0600 on a machine whose only interactive account is the one running
   the app, and there is no TLS on this hop anyway, so the wire is the weak
@@ -76,8 +76,7 @@ def load_password() -> str:
 
     if not PASSWORD_PATH.exists():
         try:
-            # O_EXCL for the same reason identity.load_key() uses it: two
-            # processes starting at once must not each write a different
+            # O_EXCL so that two processes starting at once must not each write a different
             # password and leave whichever lost the race rejecting logins.
             fd = os.open(PASSWORD_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             with os.fdopen(fd, "w") as f:

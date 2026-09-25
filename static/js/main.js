@@ -1,6 +1,7 @@
-// Kiosk display logic: roster strip, objectives, media loop, tap-confirmation toast.
-// No touchscreen assumed - this page just runs unattended, driven entirely by
-// polling the backend for CAC tap events.
+// Kiosk display logic: roster strip, keyboard check-in, objectives, media
+// loop, confirmation toast. No touchscreen assumed - a keyboard (and
+// optionally a mouse) in front of an otherwise unattended board, which polls
+// the backend for status changes.
 
 const POLL_MS = 1500;
 const TOAST_VISIBLE_MS = 4000;
@@ -100,17 +101,12 @@ renderClock();
 // What the status line says for each state. Matches dashboard.js.
 const STATUS_LABELS = { in: "In lab", away: "Away", out: "Out" };
 
-// The third line of a roster card, when there is one. Both things that can
-// appear there share one line rather than taking one each: the card's height
-// is pinned to three lines (see .kiosk .roster__card in style.css), and a
-// manual checkout can carry a typed note as well as the no-card mark. The
-// note is a checkout comment or, for someone away, where they went - the
-// server sends whichever applies as `note`.
+// The third line of a roster card, when there is one: a checkout comment or,
+// for someone away, where they went - the server sends whichever applies as
+// `note`. The card's height is pinned to three lines (see .kiosk
+// .roster__card in style.css), so this never grows a fourth.
 function rosterNote(m) {
-  const parts = [];
-  if (m.manual) parts.push('<span class="roster__nocard">No card</span>');
-  if (m.note) parts.push(escapeHtml(m.note));
-  return parts.length ? `<div class="roster__note">${parts.join(" · ")}</div>` : "";
+  return m.note ? `<div class="roster__note">${escapeHtml(m.note)}</div>` : "";
 }
 
 function statusClass(status) {
@@ -123,15 +119,15 @@ function renderRoster(roster) {
   if (json === lastRosterJson) return;
   lastRosterJson = json;
 
-  // A real <button> rather than a div with a click handler: the card is an
-  // actual control now (click your name to check yourself in without a card),
-  // and this gets focus, Enter/Space and the accessible role for free if a
-  // keyboard is ever plugged into the kiosk. The strip is rebuilt wholesale on
-  // every change, so the click handler is delegated to the container below
-  // rather than reattached per card.
+  // A real <button> so a mouse click works as well as the keyboard. The
+  // strip is rebuilt wholesale on every change, so the click handler is
+  // delegated to the container below rather than reattached per card, and
+  // the keyboard highlight is re-applied from highlightedId afterwards.
+  // tabindex -1 keeps the cards out of the browser's own Tab order: the
+  // arrow keys are the one way to move along the strip (see "keyboard").
   const el = document.getElementById("roster");
   el.innerHTML = roster.map(m => `
-    <button type="button" class="roster__card ${statusClass(m.status)}"
+    <button type="button" tabindex="-1" class="roster__card ${statusClass(m.status)}"
             data-member-id="${m.id}" data-status="${escapeHtml(m.status)}">
       <div class="roster__ring"></div>
       <div class="roster__meta">
@@ -141,14 +137,15 @@ function renderRoster(roster) {
       </div>
     </button>
   `).join("");
+  paintHighlight();
 }
 
 // The background video keeps playing behind the confirmation overlays, so the
 // body needs to know when one is up (see .is-overlay in style.css). Derived
 // from the overlays' actual state rather than toggled independently by each:
-// they overlap when a tap finishes and the toast replaces the "reading card"
-// overlay, and independent toggles would race there.
-const OVERLAY_IDS = ["toast", "confirm", "reading-overlay", "reboot"];
+// they overlap when a check-in completes and the toast replaces the dialog,
+// and independent toggles would race there.
+const OVERLAY_IDS = ["toast", "confirm", "reboot"];
 function syncOverlayState() {
   const shown = OVERLAY_IDS.some(
     (id) => document.getElementById(id).classList.contains("is-visible"));
@@ -161,9 +158,18 @@ function setToastVisible(visible) {
 }
 
 function hideNotePrompt() {
+  if (document.body.classList.contains("is-note-prompt")) releaseFocus();
   document.getElementById("toast-note").style.display = "none";
   document.body.classList.remove("is-note-prompt");
   clearTimeout(showToast._noteTimeout);
+}
+
+// Drop focus from whatever control had it (a dialog button, the note box) so
+// keys go back to the document-level handler that drives the roster strip.
+function releaseFocus() {
+  if (document.activeElement && document.activeElement !== document.body) {
+    document.activeElement.blur();
+  }
 }
 
 const ACTION_LABELS = { in: "Checked in", away: "Stepped away", out: "Checked out" };
@@ -173,20 +179,14 @@ function showToast(event) {
   toast.classList.remove("is-out", "is-away", "is-error");
   clearTimeout(showToast._t);
   hideNotePrompt();
-  // Something happened - a card tap, or this page's own click-to-toggle.
-  // Either way a half-answered click dialog is now about the wrong moment,
-  // so it goes rather than reappearing under the toast. A *tap's* question
-  // is different: that one follows the server's pending_tap (see
-  // syncTapChoice), which takes it down itself once the tap is resolved,
-  // and an unrelated event landing meanwhile shouldn't dismiss it.
-  if (dialog && dialog.mode === "click") closeConfirm();
-
-  const hint = document.getElementById("toast-hint");
+  // Something happened - possibly from another machine. A half-answered
+  // dialog is now about the wrong moment, so it goes rather than
+  // reappearing under the toast.
+  closeConfirm();
 
   if (event.action === "error") {
-    document.getElementById("toast-name").textContent = event.message || "Card not recognized";
+    document.getElementById("toast-name").textContent = event.message || "Something went wrong";
     document.getElementById("toast-action").textContent = "";
-    hint.style.display = "none";
     toast.classList.add("is-error");
     setToastVisible(true);
     showToast._t = setTimeout(() => setToastVisible(false), TOAST_VISIBLE_MS);
@@ -199,13 +199,6 @@ function showToast(event) {
   if (event.action === "away" && event.location) actionText = `Away · ${event.location}`;
   document.getElementById("toast-action").textContent = actionText;
   toast.classList.toggle("is-away", event.action === "away");
-  // "You may remove your card now" is the wrong thing to say to someone who
-  // just clicked their own name, and the mark it leaves on the board is worth
-  // stating at the moment it is made rather than only afterwards.
-  hint.textContent = event.manual
-    ? "No card used — recorded as a manual entry"
-    : "You may remove your card now";
-  hint.style.display = "block";
   setToastVisible(true);
 
   if (event.action === "out" && event.change_id) {
@@ -241,70 +234,65 @@ function showToast(event) {
 
     const skipBtn = document.getElementById("note-skip");
     const saveBtn = document.getElementById("note-save");
-    document.getElementById("note-save").onclick = save;
-    document.getElementById("note-skip").onclick = finish;
+    saveBtn.onclick = save;
+    skipBtn.onclick = finish;
 
     // Enter from the text box moves the selection onto a button rather than
     // acting straight away: what they typed picks which button is offered,
     // and a second Enter on that button commits it. A focused <button>
     // activates on Enter natively, so that second step needs no handler -
     // and because the button isn't focused yet when this keydown fires, the
-    // same keypress can't fall through and activate it.
+    // same keypress can't fall through and activate it. Escape anywhere in
+    // the prompt is Skip. The prompt owns its keys while it is up
+    // (stopPropagation), for the same reason the dialog does.
     input.onkeydown = (e) => {
-      if (e.key === "ArrowDown") { e.preventDefault(); skipBtn.focus(); }
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); finish(); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); skipBtn.focus(); }
       else if (e.key === "Enter") {
         e.preventDefault();
         (input.value.trim() ? saveBtn : skipBtn).focus();
       }
     };
     skipBtn.onkeydown = (e) => {
-      if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); finish(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
       else if (e.key === "ArrowRight") { e.preventDefault(); saveBtn.focus(); }
     };
     saveBtn.onkeydown = (e) => {
-      if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
+      e.stopPropagation();
+      if (e.key === "Escape") { e.preventDefault(); finish(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); input.focus(); }
       else if (e.key === "ArrowLeft") { e.preventDefault(); skipBtn.focus(); }
     };
 
     showToast._noteTimeout = setTimeout(finish, NOTE_PROMPT_TIMEOUT_MS);
   } else {
-    // Checking in (or any non-checkout event): plain toast, auto-hide as before.
+    // Checking in (or any non-checkout event): plain toast, auto-hide.
     showToast._t = setTimeout(() => setToastVisible(false), TOAST_VISIBLE_MS);
   }
 }
 
-// --- the leaving / check-in dialog -------------------------------------
-// One dialog, two ways in.
+// --- the check-in / leaving dialog ---------------------------------------
+// Opened for one member, from the keyboard (arrows to highlight a name, then
+// Enter) or a mouse click on their card. It asks first on purpose: the
+// strip sits in the open all day, and without a confirmation step a single
+// stray keypress or click would silently move somebody in or out.
 //
-// Click: your name on the roster strip, for the no-card path - a reader
-// that's down, a card left at home, the stretch before the reader is even
-// installed - so it has to work with a mouse and nothing else, hence buttons
-// rather than anything typed. It asks first on purpose: the strip is six
-// large targets along the bottom of a screen that sits in the open all day,
-// and without a confirmation step a single stray click silently moves
-// somebody in or out with nothing to show who did it.
-// Every change this writes is flagged manual server-side, and the board says
-// "No card" beside that person's name until their next tap.
+// The buttons depend on where the person is now. Out: [Cancel] [Check in].
+// In: [Cancel] [Check out] plus the "still at work, elsewhere" row - a button
+// per preset in config/locations.json ("Server room", ...) and an "Other..."
+// that reveals a text box. Away: [Cancel] [Back in lab] [Check out].
 //
-// Tap: a card read from someone who is already in. That tap means "leaving"
-// but not where to - home, or the server room - so the server parks it as
-// pending_tap on /api/state instead of writing anything, and this dialog is
-// the question. The server owns the clock: with no answer in
-// TAP_CHOICE_TIMEOUT_S it records a checkout itself, so the tap is logged
-// even if this page is dead. The dialog therefore follows the server's state
-// (syncTapChoice) rather than its own timer, and offers no Cancel - the card
-// was read; the only choices are what it meant.
-//
-// Leaving offers "Check out" plus a button per preset in
-// config/locations.json ("Server room", ...) and an "Other..." that reveals a
-// text box, so the common cases are one click and no keyboard.
+// The likeliest action takes focus, so the keyboard path is Enter to open,
+// Enter to confirm; arrows move between buttons and Escape cancels.
 
-const CONFIRM_TIMEOUT_MS = 20000;   // an abandoned click dialog must not sit on the board
+const CONFIRM_TIMEOUT_MS = 20000;   // an abandoned dialog must not sit on the board
 
 const confirmEl = document.getElementById("confirm");
 const confirmNameEl = document.getElementById("confirm-name");
 const confirmActionEl = document.getElementById("confirm-action");
-const confirmHintEl = document.getElementById("confirm-hint");
 const confirmCancelBtn = document.getElementById("confirm-cancel");
 const confirmInBtn = document.getElementById("confirm-in");
 const confirmOutBtn = document.getElementById("confirm-out");
@@ -313,11 +301,9 @@ const confirmLocationsEl = document.getElementById("confirm-locations");
 const confirmOtherForm = document.getElementById("confirm-other");
 const confirmOtherInput = document.getElementById("confirm-other-input");
 
-// What the open dialog is about, or null when closed - which is also what
-// makes a second click on a button (or a timeout landing on an
-// already-submitted dialog) a no-op.
-//   { mode: "click", memberId, status }         status: in | away | out
-//   { mode: "tap",   memberId, tapId }          always someone who is in
+// What the open dialog is about - { memberId, status, name } - or null when
+// closed, which is also what makes a second Enter or click on a button (or a
+// timeout landing on an already-submitted dialog) a no-op.
 let dialog = null;
 
 // Preset away locations, from /api/locations (config/locations.json).
@@ -329,6 +315,7 @@ function closeConfirm() {
   dialog = null;
   confirmEl.classList.remove("is-visible");
   document.body.classList.remove("is-confirm");
+  releaseFocus();
   syncOverlayState();
 }
 
@@ -344,22 +331,29 @@ function renderLocationButtons() {
   `<button type="button" class="confirm__btn" data-other>Other…</button>`;
 }
 
-function openDialog(next) {
-  clearTimeout(closeConfirm._t);
-  dialog = next;
-  const status = next.mode === "tap" ? "in" : next.status;
-  const leaving = status !== "out";
+// Name and current status come off the card rather than a copy of the
+// roster kept on the side: the strip is already the rendering of exactly
+// that data, and re-reading it can't drift out of sync with what the person
+// is looking at.
+function openConfirm(card) {
+  const memberId = Number(card.dataset.memberId);
+  if (!memberId) return;
+  const status = card.dataset.status;
+  dialog = { memberId, status, name: card.querySelector(".roster__name").textContent };
 
-  confirmNameEl.textContent = next.name;
+  // Whoever is at the board now outranks a toast still up from the last
+  // person (a note prompt included), which would otherwise sit on top of
+  // this dialog for its remaining seconds.
+  clearTimeout(showToast._t);
+  hideNotePrompt();
+  setToastVisible(false);
+
+  confirmNameEl.textContent = dialog.name;
   confirmActionEl.textContent =
     status === "in" ? "Leaving the lab?" : status === "away" ? "Back in the lab?" : "Check in?";
   confirmEl.classList.toggle("is-out", status === "in");
   confirmEl.classList.toggle("is-away", status === "away");
 
-  // Which buttons apply. Out: [Cancel] [Check in]. In: [Cancel] [Check out]
-  // + the away row. Away: [Cancel] [Back in lab] [Check out]. A tap has no
-  // Cancel, and only ever comes from someone who is in.
-  confirmCancelBtn.hidden = next.mode === "tap";
   confirmInBtn.hidden = status === "in";
   confirmInBtn.textContent = status === "away" ? "Back in lab" : "Check in";
   confirmOutBtn.hidden = status === "out";
@@ -370,88 +364,30 @@ function openDialog(next) {
     confirmOtherInput.value = "";
   }
 
-  confirmHintEl.textContent = next.mode === "tap"
-    ? `No choice within ${next.expiresInS}s records a checkout.`
-    : "No card will be read — the board will show this as a manual entry.";
-
   confirmEl.classList.add("is-visible");
   document.body.classList.add("is-confirm");
   syncOverlayState();
 
-  if (next.mode === "tap") {
-    // Check out is what happens anyway if nothing is chosen, so it is the
-    // safe place for a stray Enter. The server's deadline is the real one;
-    // the local timer is only a backstop against the poll that would
-    // normally take this down having died with the backend.
-    confirmOutBtn.focus();
-    closeConfirm._t = setTimeout(closeConfirm, (next.expiresInS + 10) * 1000);
-  } else {
-    // Cancel takes focus, not an action: if a keyboard is ever plugged in, a
-    // stray Enter should land on the harmless button.
-    confirmCancelBtn.focus();
-    closeConfirm._t = setTimeout(closeConfirm, CONFIRM_TIMEOUT_MS);
-  }
-}
-
-// Name and current status come off the card that was clicked rather than a
-// copy of the roster kept on the side: the strip is already the rendering of
-// exactly that data, and re-reading it can't drift out of sync with what the
-// person is looking at.
-function openConfirm(card) {
-  const memberId = Number(card.dataset.memberId);
-  if (!memberId) return;
-  openDialog({
-    mode: "click",
-    memberId,
-    status: card.dataset.status,
-    name: card.querySelector(".roster__name").textContent,
-  });
-}
-
-// The server has a tap waiting on this question (or no longer does). The
-// dialog mirrors that: a new pending id opens it, null closes it. Deriving
-// it from the poll rather than from local events means a page reload
-// mid-question comes back showing the question, and the server's own
-// timeout (which records a checkout) takes it down without any help.
-function syncTapChoice(pending) {
-  if (!pending) {
-    if (dialog && dialog.mode === "tap") closeConfirm();
-    return;
-  }
-  if (dialog && dialog.mode === "tap" && dialog.tapId === pending.id) return;
-  // The person is standing at the reader: their question outranks a toast
-  // still on screen (someone else's note prompt included) and any click
-  // dialog that was open.
-  clearTimeout(showToast._t);
-  hideNotePrompt();
-  setToastVisible(false);
-  openDialog({
-    mode: "tap",
-    tapId: pending.id,
-    memberId: pending.member_id,
-    name: pending.display_name,
-    expiresInS: pending.expires_in_s,
-  });
+  // The likeliest answer takes focus, so Enter-Enter is the whole flow:
+  // someone out is checking in, someone in is checking out, someone away is
+  // coming back.
+  (status === "in" ? confirmOutBtn : confirmInBtn).focus();
+  closeConfirm._t = setTimeout(closeConfirm, CONFIRM_TIMEOUT_MS);
 }
 
 async function submitChoice(action, location) {
   const d = dialog;
   if (d === null) return;
-  closeConfirm();       // also clears the state, so a double click can't post twice
+  closeConfirm();       // also clears the state, so a double press can't post twice
 
-  const url = d.mode === "tap" ? "/api/tap-choice" : "/api/manual-toggle";
-  const body = d.mode === "tap"
-    ? { tap_id: d.tapId, action, location }
-    : { member_id: d.memberId, action, location };
   try {
-    const res = await fetch(url, {
+    const res = await fetch("/api/set-status", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ member_id: d.memberId, action, location }),
     });
-    // 409: the answer no longer applies - the tap already timed out to a
-    // checkout, or a click was made against a status that changed under
-    // it. Whatever the board shows next is the truth; nothing to report.
+    // 409: the choice no longer applies - the status changed under it (from
+    // another machine, say). Whatever the board shows next is the truth.
     if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
   } catch (e) {
     report("choice-failed", e);
@@ -467,20 +403,23 @@ async function submitChoice(action, location) {
 }
 
 // Delegated, because renderRoster() replaces the whole strip whenever the
-// data changes and per-card handlers would go with it.
+// data changes and per-card handlers would go with it. A click also moves
+// the keyboard highlight there, so the two never disagree about who is
+// selected.
 document.getElementById("roster").addEventListener("click", (e) => {
   const card = e.target.closest(".roster__card");
-  if (card) openConfirm(card);
+  if (!card) return;
+  setHighlight(Number(card.dataset.memberId));
+  openConfirm(card);
 });
 
 // One handler for every button in the dialog, since the location row is
-// rebuilt on open. Clicking the backdrop is a cancel for a click dialog: it
-// covers the screen, so "somewhere else" is the instinctive way out of one
-// opened by mistake. Not for a tap - that has no cancel.
+// rebuilt on open. Clicking the backdrop cancels: it covers the screen, so
+// "somewhere else" is the instinctive way out of one opened by mistake.
 confirmEl.addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) {
-    if (e.target === confirmEl && dialog && dialog.mode === "click") closeConfirm();
+    if (e.target === confirmEl) closeConfirm();
     return;
   }
   if (btn === confirmCancelBtn) closeConfirm();
@@ -494,36 +433,126 @@ confirmEl.addEventListener("click", (e) => {
 
 confirmOtherForm.addEventListener("submit", (e) => {
   e.preventDefault();
-  // Empty is allowed - "away, somewhere" is still true, and with no keyboard
-  // on the kiosk it may be all that can be said.
+  // Empty is allowed - "away, somewhere" is still true.
   submitChoice("away", confirmOtherInput.value.trim() || null);
 });
 
-// Keyboard is a courtesy here (the kiosk has no keyboard), and matches the
-// note prompt's arrow-key handling: left/right step through whichever
-// buttons are showing. Enter on a focused button is native, and Enter in the
-// text box submits its form.
+// Inside the dialog every arrow key steps through whichever buttons are
+// showing (the location row wraps onto more than one line, so up/down act
+// like left/right rather than trying to be spatial). Enter on a focused
+// button is native, and Enter in the text box submits its form.
 confirmEl.addEventListener("keydown", (e) => {
+  // The dialog owns every key while it is up. Without this, the Escape that
+  // closes it would bubble on to the document handler below - which by then
+  // sees no dialog - and clear the roster highlight as well.
+  e.stopPropagation();
   if (e.key === "Escape") {
-    if (dialog && dialog.mode === "click") { e.preventDefault(); closeConfirm(); }
+    e.preventDefault();
+    // From the "Other" box, Escape backs out to the buttons first.
+    if (e.target === confirmOtherInput) {
+      confirmOtherForm.hidden = true;
+      confirmEl.querySelector("[data-other]").focus();
+    } else {
+      closeConfirm();
+    }
     return;
   }
-  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-  if (e.target === confirmOtherInput) return;
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+  if (!step) return;
+  if (e.target === confirmOtherInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
   e.preventDefault();
   const buttons = [...confirmEl.querySelectorAll("button")]
     .filter((b) => !b.hidden && !b.closest("[hidden]"));
   if (!buttons.length) return;
   const at = buttons.indexOf(document.activeElement);
-  const step = e.key === "ArrowRight" ? 1 : -1;
   buttons[(at + step + buttons.length) % buttons.length].focus();
+});
+
+// --- keyboard --------------------------------------------------------
+// The kiosk's front door: a keyboard in front of the board. Left/right move
+// a highlight along the roster strip, Enter opens the dialog for whoever is
+// highlighted (see the hint in the header, #keys-hint in index.html). The
+// highlight is a class plus a CSS outline rather than DOM focus, so it
+// survives renderRoster() rebuilding the strip, and it is dropped after
+// HIGHLIGHT_IDLE_MS so a ring isn't left parked on one name all day.
+//
+// Handled at the document so it works however focus has wandered - Chromium
+// in kiosk mode starts with focus on the page itself, not on any control.
+// While the dialog or the note prompt is up, their own handlers own the keys.
+
+const HIGHLIGHT_IDLE_MS = 30000;
+let highlightedId = null;
+
+function rosterCards() {
+  return [...document.querySelectorAll("#roster .roster__card")];
+}
+
+// Apply highlightedId to the current strip. A member who has left the roster
+// takes the highlight with them.
+function paintHighlight() {
+  let found = false;
+  for (const card of rosterCards()) {
+    const on = Number(card.dataset.memberId) === highlightedId;
+    card.classList.toggle("is-highlighted", on);
+    found = found || on;
+  }
+  if (!found) highlightedId = null;
+  document.body.classList.toggle("has-highlight", highlightedId !== null);
+}
+
+function setHighlight(memberId) {
+  highlightedId = memberId;
+  paintHighlight();
+  clearTimeout(setHighlight._t);
+  if (memberId !== null) {
+    setHighlight._t = setTimeout(() => setHighlight(null), HIGHLIGHT_IDLE_MS);
+  }
+}
+
+function moveHighlight(step) {
+  const cards = rosterCards();
+  if (!cards.length) return;
+  const at = cards.findIndex((c) => Number(c.dataset.memberId) === highlightedId);
+  // Nothing highlighted yet: right starts at the first name, left at the last.
+  const next = at === -1
+    ? (step > 0 ? 0 : cards.length - 1)
+    : Math.min(cards.length - 1, Math.max(0, at + step));
+  setHighlight(Number(cards[next].dataset.memberId));
+}
+
+document.addEventListener("keydown", (e) => {
+  if (dialog !== null || document.body.classList.contains("is-note-prompt")) return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const cards = rosterCards();
+  switch (e.key) {
+    case "ArrowRight": case "ArrowDown": moveHighlight(1); break;
+    case "ArrowLeft":  case "ArrowUp":   moveHighlight(-1); break;
+    case "Home": if (cards.length) setHighlight(Number(cards[0].dataset.memberId)); break;
+    case "End":  if (cards.length) setHighlight(Number(cards[cards.length - 1].dataset.memberId)); break;
+    case "Escape": setHighlight(null); break;
+    // Enter only, not Space: a button activates on Space's *keyup*, which
+    // would land on the dialog's freshly focused "Check in" and confirm it
+    // before the person has seen the question.
+    case "Enter": {
+      // Enter with nothing highlighted just starts the highlight - opening a
+      // dialog for whoever happens to be first would be a guess.
+      const card = cards.find((c) => Number(c.dataset.memberId) === highlightedId);
+      if (card) { setHighlight(highlightedId); openConfirm(card); }
+      else moveHighlight(1);
+      break;
+    }
+    default: return;
+  }
+  // Keeps a card that took focus from a mouse click from also activating
+  // natively on Enter, which would open the dialog twice.
+  e.preventDefault();
 });
 
 // --- pointer visibility ----------------------------------------------
 // The board hides the cursor (cursor: none on body.kiosk) - a pointer parked
 // in the middle of an unattended display for a week is exactly the sort of
-// thing nobody comes back to move. But the roster strip is clickable now, so
-// it has to come back the moment the mouse moves and go away again once it
+// thing nobody comes back to move. But the roster strip is clickable, so it
+// has to come back the moment the mouse moves and go away again once it
 // stops.
 //
 // Cheap by construction: one class check per mousemove and no timer churn
@@ -551,39 +580,6 @@ document.addEventListener("mousemove", () => {
   document.body.classList.add("has-pointer");
   hidePointerWhenIdle._t = setTimeout(hidePointerWhenIdle, POINTER_IDLE_MS);
 }, { passive: true });
-
-// --- card reader presence --------------------------------------------
-// The board is unattended: an unplugged reader, or a pcscd that died, looks
-// exactly like a quiet day unless the board says so. The server samples it
-// on a timer (cac_reader.start_reader_watch) and ships the result on
-// /api/state, so this side only paints it.
-
-const READER_LABELS = {
-  ok: "Reader ready",
-  down: "Reader offline",
-  unknown: "Reader unknown",
-};
-
-// Only the status drives the display, so that's the whole cache key - the
-// detail string (which reader, why it's down) is for the journal, not the
-// board. Without this compare the header would be rewritten every 1.5s.
-let lastReaderStatus = "";
-function renderReader(reader) {
-  const status = (reader && READER_LABELS[reader.status]) ? reader.status : "unknown";
-  if (status === lastReaderStatus) return;
-  lastReaderStatus = status;
-
-  const el = document.getElementById("reader-status");
-  el.textContent = READER_LABELS[status];
-  el.classList.toggle("is-ok", status === "ok");
-  el.classList.toggle("is-down", status === "down");
-  el.classList.toggle("is-unknown", status === "unknown");
-}
-
-function setReading(active) {
-  document.getElementById("reading-overlay").classList.toggle("is-visible", active);
-  syncOverlayState();
-}
 
 // --- reboot notice ---------------------------------------------------
 // The server schedules a reboot when the board reaches a state only a reboot
@@ -628,7 +624,7 @@ function renderReboot(reboot) {
   rebootTimer = setInterval(tickReboot, 1000);
 }
 
-// Polls can overlap: submitChoice() fires one the instant a click has been
+// Polls can overlap: submitChoice() fires one the instant a choice has been
 // recorded instead of waiting out the interval, so two are briefly in flight.
 // If the older reply lands second it carries the pre-click state - repainting
 // a stale roster, and re-toasting the event before it, since its id differs
@@ -648,8 +644,6 @@ async function poll() {
     if (seq < latestPollApplied) return;
     latestPollApplied = seq;
     renderRoster(data.roster);
-    renderReader(data.reader);
-    setReading(!!data.reading);
     renderReboot(data.reboot);
 
     const incomingId = data.last_event && data.last_event.event_id;
@@ -662,10 +656,6 @@ async function poll() {
       showToast(data.last_event);
       lastEventId = incomingId;
     }
-    // After the toast: when a parked tap resolves, its event and the cleared
-    // pending_tap arrive in the same reply, and the toast has to be up
-    // before the question comes down.
-    syncTapChoice(data.pending_tap);
   } catch (e) {
     report("poll-failed", e);
   }

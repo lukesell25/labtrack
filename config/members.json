@@ -1,25 +1,10 @@
 {
-  "_comment": "display_name is what shows on the kiosk and dashboard. edipi_hash is a one-way hash of the member's 10-digit DoD ID, salted with config/roster.key - the number itself is never stored here. Add people with scripts/add-member.py \"Their Name\"; remove someone by deleting their entry. Restart the app to apply either.",
+  "_comment": "Names shown on the kiosk and dashboard, one per entry. Add someone by adding their name; remove them by deleting it. Restart the app to apply either (sudo systemctl restart labtrack). The name is the identity: renaming someone here makes them a new member, starting out as 'out'.",
   "members": [
-    {
-      "edipi_hash": "8e438879897f0e081615291196607ef9",
-      "display_name": "Luke Sellmayer"
-    },
-    {
-      "edipi_hash": "59c6e9d11421a7d524649b139861d5b8",
-      "display_name": "Drew Gibson"
-    },
-    {
-      "edipi_hash": "5a946a2aede2fcf1a3cbabb4de53557a",
-      "display_name": "Elijah Goodrich"
-    },
-    {
-      "edipi_hash": "pending-austin-weingart",
-      "display_name": "Austin Weingart"
-    },
-    {
-      "edipi_hash": "pending-chad-mello",
-      "display_name": "Chad Mello"
-    }
+    "Luke Sellmayer",
+    "Drew Gibson",
+    "Elijah Goodrich",
+    "Austin Weingart",
+    "Chad Mello"
   ]
 }

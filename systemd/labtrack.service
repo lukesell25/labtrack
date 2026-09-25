@@ -1,7 +1,6 @@
 [Unit]
 Description=LabTrack web app (who's-in status board)
-After=network.target pcscd.service
-Wants=pcscd.service
+After=network.target
 
 [Service]
 Type=simple
@@ -17,9 +16,10 @@ Environment=PATH=/home/admin/labtrack/venv/bin:/usr/local/bin:/usr/bin:/bin
 # upstream leaves stderr block-buffered - during a multi-day soak test a
 # buffered final line is exactly the one you want after a crash.
 Environment=PYTHONUNBUFFERED=1
-# -w 1 is load-bearing, do NOT raise it: app.py starts the CAC monitor and
-# holds the last-event state at import time, so a second worker would mean a
-# second monitor fighting over the reader and a second copy of that state.
+# -w 1 is load-bearing, do NOT raise it: app.py holds the last-event state
+# in memory and starts its background threads (daily reset, health monitor)
+# at import time, so a second worker would mean a second copy of each - and
+# the kiosk would miss toasts depending on which worker answered its poll.
 # --threads lets the one worker serve the kiosk's 1.5s poll without queueing
 # behind a dashboard request from another PC (the sync worker is serial).
 # 0.0.0.0 so the dashboard is reachable from other PCs on the lab network;
