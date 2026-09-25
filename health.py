@@ -280,9 +280,14 @@ def _fmt(value, suffix="", spec=".0f"):
     return "?" if value is None else f"{value:{spec}}{suffix}"
 
 
-def sample(kiosk_idle_s=None):
+def sample(kiosk_idle_s=None, kiosk_video=None):
     """
     Take one reading. Returns (message, is_warning, concerns).
+
+    kiosk_video is (fps shown, frames dropped) for the background video over
+    the kiosk's last minute, or None when none is playing. It is reported but
+    never a concern: a Pi that can't keep up drops frames all day, and a
+    WARNING a minute would bury the ones that mean something.
 
     Split out from the loop so it can be called directly - the /api/health
     route uses it, which also makes it checkable on a dev machine where most
@@ -335,6 +340,11 @@ def sample(kiosk_idle_s=None):
         f"disk_free={_fmt(disk_free, 'M')}",
         f"throttled={throttle_raw or '?'}",
         f"kiosk_idle={_fmt(kiosk_idle_s, 's')}",
+        # From the kiosk page, not a probe here, so "-" (no video playing, or
+        # its first two minutes) rather than "?" (a probe that failed). 30 is the
+        # file's own rate; anything under it is the board not keeping up.
+        f"video_fps={'-' if kiosk_video is None else f'{kiosk_video[0]:.1f}'}",
+        f"video_dropped={'-' if kiosk_video is None else kiosk_video[1]}",
         f"uptime={_fmt(uptime_s(), 's')}",
     ]
     message = "health " + " ".join(parts)
@@ -351,10 +361,11 @@ def uptime_s():
         return None
 
 
-def start_health_monitor(kiosk_idle_fn=None, interval_s=SAMPLE_INTERVAL_S):
+def start_health_monitor(kiosk_idle_fn=None, kiosk_video_fn=None, interval_s=SAMPLE_INTERVAL_S):
     """
     Start the heartbeat thread. kiosk_idle_fn, if given, returns seconds
-    since the kiosk page last polled /api/state (None if it never has).
+    since the kiosk page last polled /api/state (None if it never has);
+    kiosk_video_fn returns what sample() takes as kiosk_video.
     """
 
     def loop():
@@ -368,7 +379,8 @@ def start_health_monitor(kiosk_idle_fn=None, interval_s=SAMPLE_INTERVAL_S):
         while True:
             try:
                 idle = kiosk_idle_fn() if kiosk_idle_fn else None
-                message, is_warning, _ = sample(idle)
+                video = kiosk_video_fn() if kiosk_video_fn else None
+                message, is_warning, _ = sample(idle, video)
                 log.warning(message) if is_warning else log.info(message)
             except Exception:
                 # Never let a bad sample end the soak test's only heartbeat.

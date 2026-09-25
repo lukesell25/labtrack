@@ -377,8 +377,18 @@ function openConfirm(card) {
 
 async function submitChoice(action, location) {
   const d = dialog;
-  if (d === null) return;
-  closeConfirm();       // also clears the state, so a double press can't post twice
+  if (d === null || d.saving) return;   // a double press can't post twice
+  // The dialog stays up until the toast replaces it (showToast closes it).
+  // Closing it here instead flashed the board back for the length of two
+  // requests - with its scrim and slide re-rasterized, only to be covered
+  // again by the toast - and on a slow request left the screen looking as if
+  // the keypress had been ignored. Focus goes, so Enter and the arrows fall
+  // through to the document handler, which does nothing while a dialog is
+  // open. The 20s dialog timeout is left running as a backstop against a
+  // request that never returns.
+  d.saving = true;
+  releaseFocus();
+  confirmActionEl.textContent = "Saving…";
 
   try {
     const res = await fetch("/api/set-status", {
@@ -399,7 +409,11 @@ async function submitChoice(action, location) {
   // so events reach the screen through exactly one path however they were
   // caused. Polling immediately instead of waiting out POLL_MS is what keeps
   // it feeling instant; the sequence guard in poll() handles the overlap.
-  poll();
+  await poll();
+  // Still ours and still up: nothing toasted - a 409, or the poll failed (the
+  // next one will bring the toast). Checked against d so a dialog opened for
+  // someone else in the meantime is left alone.
+  if (dialog === d) closeConfirm();
 }
 
 // Delegated, because renderRoster() replaces the whole strip whenever the
@@ -632,6 +646,12 @@ function renderReboot(reboot) {
 let pollSeq = 0;
 let latestPollApplied = 0;
 
+// The background video's frame rate over the last minute, as extra query
+// parameters on the poll - see "frame-rate telemetry" below. Empty while there
+// is no video playing or no full window measured yet. Declared up here because
+// poll() first runs before that section does.
+let videoStatsQuery = "";
+
 async function poll() {
   const seq = ++pollSeq;
   try {
@@ -639,7 +659,7 @@ async function poll() {
     // dashboard's, so the health heartbeat can report a kiosk that has
     // stopped polling (a Chromium crash or renderer OOM looks like nothing
     // at all from the server side otherwise).
-    const res = await fetch("/api/state?src=kiosk");
+    const res = await fetch("/api/state?src=kiosk" + videoStatsQuery);
     const data = await res.json();
     if (seq < latestPollApplied) return;
     latestPollApplied = seq;
@@ -839,6 +859,40 @@ setInterval(() => {
   document.body.classList.remove("has-bg");
   videoStalledSince = 0;
 }, VIDEO_CHECK_MS);
+
+// --- frame-rate telemetry --------------------------------------------
+// "The video lags" is otherwise only ever an impression. Once a minute, work
+// out how many frames the background actually got on screen and how many
+// Chromium dropped for arriving too late to show, and ride them along on the
+// kiosk's next polls (no request of its own). health.py prints them as
+// video_fps= / video_dropped= in the heartbeat, so a change meant to make the
+// video smoother can be judged by numbers from the Pi rather than by eye.
+// Computed here rather than server-side so /api/health, which samples on
+// demand, can't disturb the window.
+const VIDEO_STATS_MS = 60000;
+let lastVideoQuality = null;
+
+setInterval(() => {
+  if (!document.body.classList.contains("has-bg") || bgVideoEl.paused ||
+      !bgVideoEl.getVideoPlaybackQuality) {
+    lastVideoQuality = null;
+    videoStatsQuery = "";
+    return;
+  }
+  const q = bgVideoEl.getVideoPlaybackQuality();
+  const now = performance.now();
+  const prev = lastVideoQuality;
+  lastVideoQuality = { at: now, total: q.totalVideoFrames, dropped: q.droppedVideoFrames };
+  // Counters restart with the media pipeline; skip the window that spans that.
+  if (!prev || q.totalVideoFrames < prev.total || q.droppedVideoFrames < prev.dropped) {
+    videoStatsQuery = "";
+    return;
+  }
+  const seconds = (now - prev.at) / 1000;
+  const dropped = q.droppedVideoFrames - prev.dropped;
+  const shown = q.totalVideoFrames - prev.total - dropped;
+  videoStatsQuery = `&vfps=${(shown / seconds).toFixed(1)}&vdrop=${dropped}`;
+}, VIDEO_STATS_MS);
 
 if (BACKGROUND_VIDEO) {
   bgVideoEl.src = `/static/media/${BACKGROUND_VIDEO}`;

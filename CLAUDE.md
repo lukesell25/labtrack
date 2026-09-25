@@ -183,6 +183,14 @@ always there.
   keep the two rendering identically; without them the kiosk strip picks up
   a native border and centred system text. The click handler is delegated
   to `#roster`, since `renderRoster()` replaces the strip wholesale.
+- **The dialog stays up, reading "Saving…", until the toast replaces it.**
+  `submitChoice()` does not close it; `showToast()` does, when the poll
+  brings the event (or `submitChoice()` itself after a 409 or a failed
+  poll). Closing it first flashed the board back between the two overlays
+  and re-rasterized the slide only to cover it again, and on a slow request
+  looked like an ignored keypress. `dialog.saving` makes a second Enter a
+  no-op; focus is released so keys fall through to the document handler,
+  which ignores them while a dialog is open.
 - **`poll()` numbers its own requests and drops out-of-order replies.**
   `submitChoice()` fires a poll the instant the POST returns instead of
   waiting out `POLL_MS`, so two are briefly in flight; the older reply
@@ -349,6 +357,11 @@ What was already removed for this reason (don't reintroduce it):
   ~99% of the time).
 - **`:has()` on `<body>`** — re-runs selector matching on every DOM
   mutation, and the roster re-renders on a timer. Toggle a class from JS.
+- **`border-radius` on `.media`** — with `overflow: hidden` it clips the
+  background video to a rounded rect, and with two layers under the clip
+  (the video, and the slide/scrim above it) Chromium can't do that in the
+  shader: it renders the whole panel offscreen and masks it, every video
+  frame. Don't round anything that clips a video.
 
 Rules that matter for anything new:
 
@@ -383,6 +396,20 @@ Rules that matter for anything new:
   shipped clip is 12.4 Mb/s at level 4.0 and verified on the Pi, up from
   4.1 Mb/s, which was visibly soft. Above ~20 Mb/s x264 needs level 4.2,
   which is untested on this hardware.
+- **Resolution is the biggest lever on video smoothness, and it is
+  per-Pi.** Every stage costs per pixel per frame (decode, handing frames to
+  the GPU, compositing the panel, labwc compositing the screen), so
+  `scripts/build-loop.sh --height 720` builds the long loop at 720p: 44% of
+  the work, re-encoded from the master on the Pi so git never holds a second
+  copy. The master stays 1080p. The re-encode forces a keyframe at the loop
+  cut so the loop is still stream-copied; its seam measured 29.6dB against
+  the master's own 29.7dB at 720p.
+- **Judge video changes by `video_fps` in the health heartbeat, not by
+  eye.** The kiosk reads `getVideoPlaybackQuality()` once a minute and sends
+  frames shown per second and frames dropped as `vfps`/`vdrop` on its
+  `/api/state` polls ("frame-rate telemetry" in `main.js`); 30 is the file's
+  rate. It is informational, never a WARNING - a Pi that can't keep up would
+  otherwise warn every minute and bury the warnings that matter.
 - **The background video must never be played to its end.** Chromium drains
   the hardware decoder at end-of-stream, and the Pi's `bcm2835-codec` V4L2
   drain never completes: it stops returning frames, the picture freezes with
@@ -457,7 +484,10 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   `location`. It also holds `_kiosk_status["last_poll"]`, stamped only by
   requests carrying `?src=kiosk`, so the health heartbeat can tell a dead
   kiosk browser from a live one — the dashboard polls the same endpoint from
-  other PCs and must not be able to mask it. And `_reboot_state` (under its
+  other PCs and must not be able to mask it. The same kiosk polls carry the
+  background video's last-minute frame rate (`_kiosk_status["video"]`,
+  overwritten every poll, so it goes stale with the video). And
+  `_reboot_state` (under its
   own `_reboot_lock`) holds a pending self-reboot, surfaced on `/api/state`
   as `reboot` so the kiosk can count down on screen. This state is
   intentionally not persisted — only `members`/`presence`/`meta` in SQLite
@@ -535,7 +565,12 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     it is behind a lock that is never coming back. Measured in wall time
     rather than sample count because `sample()` is also called on demand by
     `/api/health`, and counting calls would let an extra poll push a
-    transient over the line. Also served on demand at `/api/health`, and summarised across a
+    transient over the line.
+  - `video_fps=` / `video_dropped=` are the background video's frames shown
+    per second and frames dropped over the kiosk's last minute (30 is the
+    file's rate), `-` when none is playing. Reported, never a concern.
+
+  Also served on demand at `/api/health`, and summarised across a
   whole run by `scripts/soak-report.sh`.
 - **`webauth.py`** — the shared password guarding everything that isn't the
   kiosk. The service binds `0.0.0.0` so the dashboard is readable from other
@@ -571,7 +606,13 @@ anything on this hardware. If the board ever looks sluggish again, re-check
 - **`database.py`** — all SQLite access goes through `get_conn()`, which
   keeps one connection per thread (`threading.local`) since sqlite3
   connections aren't safe to share across threads; this matters because the
-  daily-reset thread and Flask request threads both hit the DB. Schema is
+  daily-reset thread and Flask request threads both hit the DB. The file is
+  in WAL mode with `synchronous = NORMAL`, so a commit is a write to the
+  `-wal` file with no fsync; under the default rollback journal each
+  check-in waited on two SD-card fsyncs, which stall for a second or more
+  when the persistent journal or Chromium has dirty data queued - one of the
+  causes of the kiosk lagging on check-in. A power cut can lose the last
+  change, which a whiteboard reset daily doesn't care about. Schema is
   three tables. `members` is keyed on `display_name` and synced from
   `config/members.json` on every startup via `sync_members_from_config()` —
   upserts by name, and sets `active = 0` for anyone no longer listed, which

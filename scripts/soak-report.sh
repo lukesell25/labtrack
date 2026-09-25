@@ -120,6 +120,10 @@ rule "Trend"
 # uninterruptible sleep as well as running ones, so a load pinned at the core
 # count (4 on a Pi 4) with a cold CPU and a non-zero dstate is a wedge, not
 # work - nothing is running, things are stuck behind a dead kernel thread.
+#
+# video_fps is how many background-video frames reached the screen per second
+# (the file is 30fps). A min well under 30 is the video lagging; minutes with
+# no video playing read "-" and are skipped.
 journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
   | grep -F 'health mem_avail=' \
   | awk '
@@ -129,7 +133,7 @@ journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
         len   = RLENGTH - length(key) - 1;
         return substr(line, start, len) + 0;
       }
-      BEGIN { nkeys = split("mem_avail chromium_mem app_mem load1 dstate", keys, " ") }
+      BEGIN { nkeys = split("mem_avail chromium_mem app_mem load1 dstate video_fps", keys, " ") }
       {
         n++;
         for (i = 1; i <= nkeys; i++) {
@@ -148,8 +152,8 @@ journalctl -u "$UNIT" --since "$SINCE" --no-pager 2>/dev/null \
         for (i = 1; i <= nkeys; i++) {
           key = keys[i];
           if (!(key in first)) continue;
-          # load1 and dstate are counts, not megabytes.
-          unit = (key == "load1" || key == "dstate") ? "" : "M";
+          # load1 and dstate are counts, and video_fps a rate, not megabytes.
+          unit = (key == "load1" || key == "dstate" || key == "video_fps") ? "" : "M";
           printf "%-13s first %8.1f%s   last %8.1f%s   min %8.1f%s   max %8.1f%s   change %+.1f\n",
                  key, first[key], unit, last[key], unit, min[key], unit, max[key], unit,
                  last[key] - first[key];

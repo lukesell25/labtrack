@@ -38,11 +38,24 @@ def get_conn():
         _local.conn = sqlite3.connect(DB_PATH, timeout=10)
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA foreign_keys = ON")
+        # With WAL (set once, in init_db) NORMAL means a commit is a plain
+        # write() to the -wal file and only checkpoints fsync. Under the
+        # default rollback journal every commit fsynced twice, and on the Pi's
+        # SD card an fsync also flushes whatever else is dirty (the persistent
+        # journal, Chromium's profile) - so a check-in or a checkout note
+        # could sit for a second or more before the kiosk heard back. The
+        # trade is that a power cut can lose the last change or two, which on
+        # a whiteboard that is reset daily is nothing. Per-connection, so it
+        # lives here rather than in init_db.
+        _local.conn.execute("PRAGMA synchronous = NORMAL")
     return _local.conn
 
 
 def init_db():
     conn = get_conn()
+    # Persistent: stored in the file, so this is a no-op after the first run.
+    # WAL also stops the kiosk's 1.5s roster read from blocking a commit.
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(
         """
         -- Keyed by display name: config/members.json is just a list of names.

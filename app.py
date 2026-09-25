@@ -51,7 +51,11 @@ _last_event = {"id": 0}
 # heartbeat reports how long it has been quiet. Only requests tagged
 # ?src=kiosk count; the dashboard polls the same endpoint from other PCs and
 # must not be able to mask a dead kiosk.
-_kiosk_status = {"last_poll": None}
+#
+# "video" is the background video's frame rate over the kiosk's last minute,
+# (shown fps, frames dropped), or None when it isn't playing - see
+# "frame-rate telemetry" in main.js. It rides on the same polls.
+_kiosk_status = {"last_poll": None, "video": None}
 
 
 def _push_event(display_name, action, change_id=None, previous=None, location=None):
@@ -245,12 +249,33 @@ def _kiosk_idle_s():
     return None if last is None else time.monotonic() - last
 
 
+def _kiosk_video():
+    """(fps shown, frames dropped) over the kiosk's last minute, or None."""
+    with _state_lock:
+        return _kiosk_status["video"]
+
+
+def _video_stats_arg():
+    """The vfps/vdrop pair off a kiosk poll, or None if absent or malformed."""
+    try:
+        fps = float(request.args["vfps"])
+        dropped = int(request.args["vdrop"])
+    except (KeyError, ValueError):
+        return None
+    if not (0 <= fps < 1000 and 0 <= dropped < 1_000_000):
+        return None
+    return fps, dropped
+
+
 @app.route("/api/state")
 def api_state():
     from_kiosk = request.args.get("src") == "kiosk"
     with _state_lock:
         if from_kiosk:
             _kiosk_status["last_poll"] = time.monotonic()
+            # Overwritten on every poll, so a video that stops playing (the
+            # stall watchdog gives up on it) stops being reported at once.
+            _kiosk_status["video"] = _video_stats_arg()
         last_event = dict(_last_event)
     return jsonify(
         {
@@ -404,7 +429,7 @@ def api_health():
     every minute, for checking the Pi from the dashboard machine without an
     ssh session.
     """
-    message, is_warning, concerns = health_sample(_kiosk_idle_s())
+    message, is_warning, concerns = health_sample(_kiosk_idle_s(), _kiosk_video())
     return jsonify({"summary": message, "ok": not is_warning, "concerns": concerns})
 
 
@@ -447,7 +472,7 @@ _start_daily_reset()
 # the file exists and its one-time warning lands at boot rather than
 # whenever the first request from another PC happens to arrive.
 webauth.load_password()
-start_health_monitor(kiosk_idle_fn=_kiosk_idle_s)
+start_health_monitor(kiosk_idle_fn=_kiosk_idle_s, kiosk_video_fn=_kiosk_video)
 
 
 if __name__ == "__main__":

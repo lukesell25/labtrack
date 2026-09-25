@@ -1,6 +1,9 @@
 venv
 __pycache__
 labtrack.db
+# SQLite's write-ahead log and its index (journal_mode=WAL, database.py).
+labtrack.db-wal
+labtrack.db-shm
 
 # Video sources and encode experiments stay out of git — they are large,
 # they churn, and every version is permanent once committed. Only the

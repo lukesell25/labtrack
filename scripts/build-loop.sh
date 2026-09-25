@@ -22,7 +22,10 @@
 # history already had to be rewritten once to purge 131MB of video. So the
 # short file ships and the long one is built here, on the Pi, after a clone.
 #
-# Usage:   scripts/build-loop.sh [minutes]      (default 10)
+# Usage:   scripts/build-loop.sh [minutes] [--height N]
+#   minutes      length of the loop, default 10
+#   --height N   also scale the video down to N pixels tall (720 is the one
+#                to try) before building the loop - see "Lighter video" below
 # Re-run it after replacing background.mp4.
 set -euo pipefail
 
@@ -36,7 +39,20 @@ OUT=static/media/background-long.mp4
 # so the part that actually plays is everything before this tail.
 TAIL_S=5
 
-TARGET_MIN="${1:-10}"
+TARGET_MIN=10
+HEIGHT=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --height) HEIGHT="${2:-}"; shift 2 ;;
+    --height=*) HEIGHT="${1#*=}"; shift ;;
+    -*) echo "unknown option $1" >&2; exit 2 ;;
+    *) TARGET_MIN="$1"; shift ;;
+  esac
+done
+if [ -n "$HEIGHT" ] && ! [[ "$HEIGHT" =~ ^[0-9]+$ && "$HEIGHT" -ge 360 && "$HEIGHT" -le 1080 ]]; then
+  echo "--height takes a pixel height between 360 and 1080, e.g. --height 720" >&2
+  exit 2
+fi
 
 if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
   echo "ffmpeg and ffprobe are required (sudo apt install -y ffmpeg)" >&2
@@ -75,6 +91,33 @@ echo "==> building ${repeats} x ${loop_s}s = ${visible}s visible (+${TAIL_S}s ta
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+
+# Lighter video (optional). Everything the Pi does with the background costs
+# per pixel per frame - decoding it, handing each frame to the GPU, compositing
+# the panel, labwc compositing the screen - so 720p is 44% of the work of
+# 1080p at every one of those steps, and far more than that under software
+# decode (scripts/set-decode.sh), where the bitrate drops too. The price is a
+# softer picture, upscaled to the panel and seen through the 50% dim. Judge it
+# by video_fps in the health heartbeat, not by eye.
+#
+# Only the 17s master is re-encoded - here, on the Pi, so git never sees a
+# second copy of the footage - and the loop is still stream-copied from it
+# below. Frame count and rate are unchanged, so the frame-count cut and the
+# seamless wrap work as before; the forced keyframe at loop_frames is what
+# lets that cut stay a stream copy, since x264's scene detection would
+# otherwise be free to move the GOP boundaries off it. Same profile and level
+# as README step 7, and the same quality target; the bitrate cap scales with
+# the pixel count.
+if [ -n "$HEIGHT" ]; then
+  echo "==> scaling the master to ${HEIGHT}p (a one-off re-encode; a few minutes on a Pi 4)"
+  ffmpeg -v error -y -i "$SRC" -an \
+         -vf "scale=-2:${HEIGHT}:flags=lanczos" \
+         -c:v libx264 -preset slow -profile:v high -level:v 4.0 -crf 16 \
+         -maxrate 6M -bufsize 12M -pix_fmt yuv420p -g 60 -sc_threshold 0 \
+         -force_key_frames "expr:eq(n,0)+eq(n,${loop_frames})" \
+         -movflags +faststart "$work/master.mp4"
+  SRC="$work/master.mp4"
+fi
 
 # Split the master back into its two parts. Both cuts land on the keyframe at
 # loop_s - the master is encoded with -g 60 at 30fps, so there is one every

@@ -202,6 +202,19 @@ optional looping background video.
   scripts/build-loop.sh 10        # 10-minute loop; re-run after any change
   ```
 
+  **If the video stutters on the Pi**, build the loop at 720p instead:
+
+  ```bash
+  scripts/build-loop.sh 10 --height 720
+  ```
+
+  That re-encodes the master at 720p on the Pi (a few minutes) before
+  building the loop - 44% of the pixels for the Pi to decode and composite
+  every frame, at the cost of a softer picture behind the dim. The master in
+  git stays 1080p; run the script without `--height` to go back. Compare
+  `video_fps` in the health heartbeat (below) before and after rather than
+  judging by eye.
+
   This is not optional polish. The kiosk loops by seeking back to the start
   before end-of-stream, and each of those seeks is a chance to hit a
   `bcm2835_codec` kernel bug that freezes the whole display — see "Background
@@ -543,7 +556,7 @@ something on it looks wrong:
 ```
 INFO labtrack.health: health mem_avail=1204M mem_total=3792M app_mem=48.2M
 chromium_mem=612.4M chromium_procs=11 load1=0.42 temp=54.7C disk_free=21740M
-throttled=0x0 kiosk_idle=1s uptime=486213s
+throttled=0x0 kiosk_idle=1s video_fps=30.0 video_dropped=0 uptime=486213s
 ```
 
 Two fields are worth knowing about specifically:
@@ -558,6 +571,13 @@ Two fields are worth knowing about specifically:
   server, so a growing number here means Chromium crashed or its renderer was
   OOM-killed even though the app itself is fine. Over 120s and the heartbeat
   becomes a WARNING.
+- **`video_fps`** is how many background-video frames actually reached the
+  screen per second over the last minute, as the kiosk page measured it, and
+  **`video_dropped`** how many Chromium dropped for arriving too late. The
+  file is 30fps, so anything well under 30 is the video lagging. `-` means no
+  video playing (or its first two minutes). This is the number to compare
+  when trying to make the video smoother - e.g. before and after
+  `build-loop.sh --height 720`, or hardware vs software decode.
 
 A one-off sample without an ssh session:
 `curl -s -u :"$(cat dashboard.key)" http://<pi>:5000/api/health` - requests from

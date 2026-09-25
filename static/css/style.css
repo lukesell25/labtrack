@@ -161,10 +161,15 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
+/* Square corners on purpose - no border-radius here. With overflow:hidden it
+   clips the background video to a rounded rect, and because the video and
+   the slide layer above it both draw inside that clip, Chromium can't do it
+   in the shader: it renders the whole panel to an offscreen surface and masks
+   that, every video frame (cc's "rounded corner" render surface). That is a
+   full-panel extra read and write 30 times a second, for 10px of curve. */
 .media {
   flex: 1;
   min-height: 0;
-  border-radius: 10px;
   border: 1px solid var(--hairline);
   background: var(--graphite-800);
   overflow: hidden;
