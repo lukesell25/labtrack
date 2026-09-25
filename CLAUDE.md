@@ -603,6 +603,17 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `foreign_keys` off for the swap so dropping the old table can't
     cascade, and VACUUMs so the CAC-era EDIPI hashes leave the file. It
     must be idempotent; it runs on every startup.
+- **Kiosk header logo** — `static/img/fair-logo-dark.png`, the reversed
+  (dark-background) FAIR logo, shown top left in place of the old "FALCON
+  AI RESEARCH LAB" text (the dashboard still uses the text). It is
+  *generated* from the supplied `static/img/fair-logo.png`, which is navy
+  and royal blue on a solid white box: each pixel was un-mixed from the
+  white background to recover its alpha, navy turned white and royal blue
+  lightened to `#5c8ce6`, then cropped to the artwork and scaled to 160px
+  tall - 2x the 80px it is shown at. If the lab supplies an official
+  reversed logo, swap that in instead. Displayed size is fixed by
+  `width`/`height` on the `<img>`, so the header doesn't reflow when it
+  loads.
 - **The clocks are 24-hour** — the kiosk header clock and the dashboard's
   "Updated" stamp, the only times either page shows (see "No time
   tracking") — via `hourCycle: "h23"` in the shared `TIME_OPTS` at the top

@@ -10,7 +10,12 @@
 
   <main class="board">
     <header class="board__header">
-      <div class="board__eyebrow">FALCON AI RESEARCH LAB</div>
+      <!-- The dark-background ("reversed") version of the FAIR logo, made from
+           static/img/fair-logo.png - see .board__logo in style.css. width and
+           height are the displayed size, so the header is laid out before the
+           image arrives rather than jumping when it does. -->
+      <img class="board__logo" src="{{ url_for('static', filename='img/fair-logo-dark.png') }}"
+           width="261" height="80" alt="FAIR — Falcon AI Research Lab">
       <div class="board__meta">
         <!-- How to check in: the keyboard is the front door (see "keyboard"
              in main.js). Static text, so it costs nothing after first paint;

@@ -91,11 +91,23 @@ body.kiosk.is-confirm {
   color: var(--amber);
 }
 
-/* Bigger on the kiosk, which is read from across the room; the dashboard keeps
-   the small eyebrow so it stays subordinate to the h1 under it. */
-.kiosk .board__eyebrow {
-  font-size: 1.6rem;
-  letter-spacing: 0.14em;
+/* The kiosk header is the FAIR logo rather than the eyebrow text. The file is
+   the reversed (dark-background) variant: navy artwork turned white, royal
+   blue lightened, the white background made transparent - the supplied
+   static/img/fair-logo.png is navy on a solid white box, which would sit on
+   this board as a bright rectangle. Rendered at 2x its displayed height and
+   cropped to the artwork, so it is sharp without being decoded large.
+
+   The header centres its two ends when the logo is there: baseline alignment
+   would put the clock on the logo's bottom edge, well below its middle. */
+.kiosk .board__header {
+  align-items: center;
+}
+
+.board__logo {
+  display: block;
+  height: 80px;
+  width: auto;
 }
 
 /* Right-hand end of the kiosk header: keyboard hint, then the clock. */

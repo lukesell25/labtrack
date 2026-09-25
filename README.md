@@ -58,8 +58,9 @@ labtrack/
   config/locations.json     Preset "away" places for the leaving dialog (edit any time)
   config/decode-mode        hardware|software video decode (scripts/set-decode.sh)
   templates/                Kiosk + dashboard HTML
-  static/                   CSS, JS, and a media/ folder for slide pictures
-                            and the background video
+  static/                   CSS, JS, img/ (the FAIR logo, plus the dark-background
+                            version the kiosk shows), and a media/ folder for
+                            slide pictures and the background video
   health.py                 Once-a-minute health heartbeat for long runs
   webauth.py                The shared password for the dashboard from other PCs
   systemd/labtrack.service   Runs the app on boot
