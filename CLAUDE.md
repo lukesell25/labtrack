@@ -609,8 +609,8 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   *generated* from the supplied `static/img/fair-logo.png`, which is navy
   and royal blue on a solid white box: each pixel was un-mixed from the
   white background to recover its alpha, navy turned white and royal blue
-  lightened to `#5c8ce6`, then cropped to the artwork and scaled to 160px
-  tall - 2x the 80px it is shown at. If the lab supplies an official
+  lightened to `#5c8ce6`, then cropped to the artwork and scaled to 240px
+  tall - 2x the 120px it is shown at. If the lab supplies an official
   reversed logo, swap that in instead. Displayed size is fixed by
   `width`/`height` on the `<img>`, so the header doesn't reflow when it
   loads.

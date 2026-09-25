@@ -106,7 +106,7 @@ body.kiosk.is-confirm {
 
 .board__logo {
   display: block;
-  height: 80px;
+  height: 120px;
   width: auto;
 }
 
@@ -114,7 +114,7 @@ body.kiosk.is-confirm {
 .board__meta {
   display: flex;
   align-items: baseline;
-  gap: 1.75rem;
+  gap: 3.5rem;
 }
 
 /* How to check in - the one instruction on the board, so it is full
@@ -123,9 +123,13 @@ body.kiosk.is-confirm {
    nothing here ever repaints. */
 .board__keys {
   font-family: var(--mono);
-  font-size: 1.4rem;
+  font-size: 1.85rem;
   letter-spacing: 0.04em;
   color: var(--text-hi);
+  /* One line, always: at this size the hint, clock and logo fill the 1080p
+     header with ~100px to spare, and a wrapped hint would double the header's
+     height and shrink the slide panel under it. */
+  white-space: nowrap;
 }
 
 .board__keys-sep {
@@ -152,7 +156,7 @@ kbd {
 
 .board__clock {
   font-family: var(--mono);
-  font-size: 1.4rem;
+  font-size: 1.85rem;
   color: var(--text-mid);
   font-variant-numeric: tabular-nums;
 }
