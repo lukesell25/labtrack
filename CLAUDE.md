@@ -5,10 +5,41 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A Flask app for a Raspberry Pi that identifies lab members by tapping a DoD
-CAC (smart card) on a USB reader (no PIN), logs check-in/away/check-out
-events to SQLite, drives an always-on kiosk display (status board /
-screensaver + toast confirmation), and serves a dashboard viewable from
-other PCs on the network behind a shared password (see `webauth.py`).
+CAC (smart card) on a USB reader (no PIN), keeps each member's current
+status (in the lab / away on campus / out) in SQLite, drives an always-on
+kiosk display (status board / screensaver + toast confirmation), and serves
+a read-only dashboard viewable from other PCs on the network behind a
+shared password (see `webauth.py`).
+
+### No time tracking
+
+This is a "who's here right now" board, **not a timesheet**, and that is a
+deliberate product decision by the lab, not a missing feature. It used to
+keep a timestamped event log with weekly hours, an activity log and an
+admin panel for editing it; all of that was removed. Don't reintroduce any
+of it:
+
+- **The database holds current status only** - one `presence` row per
+  member (`status`, `note`, `manual`, `change_id`) that is overwritten, never
+  appended to. No per-person row carries a time. `change_id` is a counter:
+  it orders the board and keys the checkout note, and must not become a
+  clock. `_migrate_events_to_presence()` carried statuses across from the
+  old `events` table, dropped it and VACUUMed so the old timestamps don't
+  survive in the freelist.
+- **The UI shows no check-in/out times.** Not on roster cards, not on the
+  toast, not on the dashboard. The kiosk's header clock and the dashboard's
+  "Updated" stamp are the only times on either page.
+- **Status changes are not logged to the journal.** The journal is
+  timestamped and kept a month, so a line per check-in would rebuild the
+  timesheet there. `_handle_tap()` still logs an unrecognised card's hash
+  prefix, and errors are logged as ever - just never "X checked in".
+- **Everyone is reset to out once a day** (`reset_if_new_day()`, run at
+  startup and once a minute by a thread in `app.py`), because without a
+  time on the card a forgotten checkout would otherwise read "In lab"
+  forever. It keys on the date of the last reset in the `meta` table - one
+  system-wide value, not per-person - so a midday restart or self-reboot
+  changes nothing, and a Pi that was off overnight still starts clean. The
+  reset also clears yesterday's notes and NO CARD marks.
 
 ## Developing locally (off the Pi)
 
@@ -39,7 +70,7 @@ check-in toast and the checkout note prompt. Add `"action": "away",
 "location": "Server room"` (or `"action": "in"`/`"out"`) to record a
 specific state rather than a toggle. Clicking a name on the kiosk page does
 the same thing through the UI (see "Checking in without a card" below).
-Either way the event is flagged `manual` and carries a "No card" mark on
+Either way the status is flagged `manual` and carries a "No card" mark on
 the board - that is production behaviour, not a dev shortcut, so neither is
 a byte-for-byte stand-in for a tap. The one thing that can't be simulated
 without a reader is the question a tap asks (see "Three states" below):
@@ -58,23 +89,22 @@ the routes/UI directly.
 
 A member is `in` (in the lab), `away` (at work but not in the lab - the
 server room, a lecture hall) or `out` (gone home, at lunch). `away` exists
-because "not in the lab" and "not at work" are different facts and the old
-two-state log could only record the second. Things that follow from it:
+because "not in the lab" and "not at work" are different facts. Things that follow from it:
 
 - **A tap from someone who is `in` is a question, not an event.** They are
   leaving, but the tap can't say whether for the day or for the server
-  room, and guessing either way writes a wrong row. So `_handle_tap()` parks
+  room, and guessing either way shows the wrong thing. So `_handle_tap()` parks
   it as `_pending_tap` in `app.py` (under `_state_lock`), `/api/state`
   carries it as `pending_tap`, the kiosk puts the question up, and the
   answer comes back on `POST /api/tap-choice` `{tap_id, action, location}`.
   A tap from anyone else (out *or* away) is written immediately as `in`:
   they are standing at the lab's reader, which answers the question by
-  itself. The event a tap-choice writes is **not** flagged `manual` - a card
+  itself. The status a tap-choice writes is **not** flagged `manual` - a card
   was read; the choice is the second half of the same tap.
 - **The server owns the deadline.** With no answer in `TAP_CHOICE_TIMEOUT_S`
   (20s) a `threading.Timer` records a checkout - what a tap meant before
-  there was a question - so a tap is logged even if the kiosk browser is
-  dead, and walking off without choosing still logs it. The kiosk dialog
+  there was a question - so a tap is recorded even if the kiosk browser is
+  dead, and walking off without choosing still records it. The kiosk dialog
   *mirrors* `pending_tap` (`syncTapChoice()` in `main.js`: a new id opens it,
   null closes it) rather than running its own clock, so a page reload
   mid-question comes back showing the question and the server's timeout
@@ -86,7 +116,7 @@ two-state log could only record the second. Things that follow from it:
   timeout arriving together resolve it once. A manual event for the pending
   member (from the dashboard, say) also claims it - a timeout landing
   afterwards would otherwise write a checkout on top of the answer.
-- **Where they went is the event's `note`.** Same column as a checkout
+- **Where they went is the status's `note`.** Same column as a checkout
   comment: both are the one line of free text a status carries, and
   `get_roster_status()` surfaces `note` for whichever of `out`/`away` is
   current (never for `in`). On the kiosk it shares the roster card's third
@@ -96,19 +126,12 @@ two-state log could only record the second. Things that follow from it:
   objectives, rendered as buttons only when the dialog opens); "Other…"
   reveals a text box, and an empty location is allowed since the kiosk
   usually has no keyboard.
-- **Away is working time.** `get_weekly_hours()` opens a span at `in` *or*
-  `away` when none is open and closes it only at `out`, so in → away → in →
-  out is one span. `away` while already `away` is allowed (a change of
+- **Repeats.** `away` while already `away` is allowed (a change of
   location); `in` while `in` or `out` while `out` is a `ValueError` in
-  `record_event()` and a 409 from the API - it says nothing new and would
-  unpair the hours.
+  `set_status()` and a 409 from the API - it says nothing new, and means
+  the caller's view of the board is stale.
 - **The colour is its own** (`--away`, blue) with a hollow ring on the
   roster card, so "away" never reads as "in" from across the room.
-- **The `CHECK` constraint needed a table rebuild.** SQLite can't widen a
-  `CHECK`, so `_migrate_allow_away_action()` copies `events` into a new
-  table with ids intact (the dashboard holds them for its delete buttons)
-  and swaps it in. Idempotent: it keys on whether the stored `CREATE TABLE`
-  names `'away'`.
 
 ### Checking in without a card
 
@@ -125,25 +148,22 @@ in; in → Check out plus the away presets; away → Back in lab / Check out.
 A tap dialog has no Cancel, ignores Escape and the backdrop, and posts to
 `/api/tap-choice` instead.
 
-- **Every event it writes is flagged `manual`, and the board says so.** The
+- **Every status it writes is flagged `manual`, and the board says so.** The
   kiosk prints an amber `NO CARD` under that person's name until their next
-  tap, and the dashboard shows it in the roster and the activity log's Note
-  column. This is the point of the feature's design, not decoration: a CAC
+  tap (or the daily reset), and the dashboard shows it the same way. This is the point of the feature's design, not decoration: a CAC
   tap means something precisely because a card was read, and an entry
   anybody could have clicked must not be indistinguishable from one. The
-  flag lives on the event row rather than being derived later, because
-  nothing else in the row distinguishes the two.
+  flag lives on the presence row because nothing else distinguishes the two.
 - **The mark shares the roster card's note line rather than adding one.**
   `.kiosk .roster__card` has a `min-height` pinned to a three-line card
   (name + status + note), so a fourth line would start the whole bottom bar
   wobbling again - see the comment on that rule. A manual checkout can
   carry a typed note too, so both go on one line as `NO CARD · at lunch`
-  (`rosterNote()` in `main.js`, `noteText()`/`noteLine()` in
-  `dashboard.js`).
+  (`rosterNote()` in `main.js`, `noteLine()` in `dashboard.js`).
 - **It always confirms first.** The strip is six large targets along the
   bottom of a screen standing in the open all day; without the dialog one
-  stray click silently logs somebody in or out and the only trace is a line
-  in an append-only log. The dialog cancels on a backdrop click, on
+  stray click silently moves somebody in or out with nothing to show who
+  did it. The dialog cancels on a backdrop click, on
   Escape, and on a 20s timeout, so an abandoned one can't sit on the board.
   An event arriving mid-dialog supersedes a *click* dialog - `showToast()`
   calls `closeConfirm()` for `mode === "click"` only. A tap dialog is left
@@ -451,17 +471,17 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   not be able to mask it. And `_reboot_state` (under its own `_reboot_lock`)
   holds a pending self-reboot, surfaced on `/api/state` as `reboot` so the
   kiosk can count down on screen. This state is
-  intentionally not persisted — only `events`/`members` in SQLite are durable.
+  intentionally not persisted — only `members`/`presence`/`meta` in SQLite are durable.
   An `@app.errorhandler(Exception)` logs a traceback plus the offending
   method and path for anything that escapes a route, passing `HTTPException`
   straight through so ordinary 404s stay unlogged.
-  `db.init_db()`, `_init_cac_monitor()` and `start_health_monitor()` run at *import* time, not under
+  `db.init_db()`, `_start_daily_reset()`, `_init_cac_monitor()` and `start_health_monitor()` run at *import* time, not under
   `__main__`, so they also run under gunicorn — which is why
   `systemd/labtrack.service` pins `-w 1`. More than one worker would mean
   multiple CAC monitors fighting over the reader and per-worker copies of
   `_last_event`, so the kiosk would miss toasts depending on which worker
   answered the poll. Keep it single-worker.
-- **`/api/manual-toggle`** — records an event for a member without a card,
+- **`/api/manual-toggle`** — sets a member's status without a card,
   for the kiosk's click-a-name flow, the network fallback when the reader is
   down, and dev machines with no reader at all. `{member_id}` alone toggles
   (in → out, out or away → in); `action` (`in`/`away`/`out`) plus `location`
@@ -500,33 +520,10 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `admin`, not root, and logind refuses without the polkit rule. A failure
     un-schedules itself and logs what is missing, rather than leaving the
     board under a countdown for a reboot that never comes.
-- **Dashboard admin section** — the folded-away `<details>` at the bottom of
-  `/dashboard`, the one place events are *removed* rather than appended: a
-  `×` on each row of Recent activity (`DELETE /api/events/<id>`) for a
-  duplicate tap or somebody logged against the wrong name, and "Clear all
-  events" (`POST /api/events/clear`) for a fresh start. Four things about it:
-  - **Clearing snapshots the database first**, unconditionally, via
-    `db.backup_db()` → `labtrack-<stamp>.bak` beside `labtrack.db`
-    (gitignored, never pruned). It goes through sqlite's backup API rather
-    than copying the file, because the CAC reader thread holds a live
-    connection and a plain copy can catch a torn page. The dashboard reports
-    the backup's filename afterward - a snapshot nobody is told about is not
-    a recovery path.
-  - **Clearing empties `events` only.** Members are synced from
-    `config/members.json` on every startup, so deleting them here would just
-    bring them back; wiping the log is already enough to reset the board,
-    since everyone reads as `out` once nothing is more recent.
-  - **`POST /api/events/clear` requires `{"confirm": "DELETE"}` in the body**
-    and the page makes the user type it. The endpoint is on the lab network
-    behind one shared password, and requests from the Pi itself skip even
-    that (see `webauth.py`), so the body is what stops a stray call from
-    emptying the log.
-  - **Both log at WARNING what they removed** (`database.py`). Once a row is
-    gone the journal is the only remaining evidence it existed. Deleting is
-    otherwise unguarded on purpose: everything derived from the log
-    re-derives on the next poll, so removing one half of an in/out pair
-    leaves the other unmatched - the same positional pairing
-    `scripts/add-event.py` warns about when inserting.
+- **The dashboard is read-only.** It shows the roster and nothing else -
+  no hours, no activity log, and no admin panel (there is nothing
+  historical left to edit). Its cards are the same markup as the kiosk's,
+  as `<div>`s rather than buttons.
 - **`cac_reader.py`** — background thread (pyscard's `CardMonitor`) that
   watches the physical reader and identifies the card via PKCS#11, without
   requiring a PIN (reading the PIV Authentication cert, a public object, is
@@ -654,65 +651,37 @@ anything on this hardware. If the board ever looks sluggish again, re-check
 - **`database.py`** — all SQLite access goes through `get_conn()`, which
   keeps one connection per thread (`threading.local`) since sqlite3
   connections aren't safe to share across threads; this matters because the
-  CAC reader thread and Flask request threads both hit the DB. Schema is two
-  tables: `members` (synced from `config/members.json` on every startup via
-  `sync_members_from_config()` — upserts by `edipi_hash`, and sets `active = 0`
-  for anyone no longer listed, which is what takes them off the kiosk and
-  dashboard. It never DELETEs: `events.member_id` is a foreign key into
-  this table, so dropping the row would either fail or orphan the attendance
-  history the table exists to keep. Re-adding an `edipi_hash` flips `active` back
-  to 1 on the same row rather than creating a second one, so the person's
-  history reconnects. A config that parses but lists no members is treated
-  as a bad edit and deactivates nobody — otherwise one stray comma blanks
-  the whole board until someone notices and restarts) and
-  `events` (check-in/away/out log, appended to by every path that writes
-  one - all of them through `record_event()`, which `toggle_checkin()`
-  wraps - and edited nowhere except the dashboard's admin section above;
-  `action` is one of `ACTIONS` = `'in'`/`'away'`/`'out'`, current status for
-  a member = the most recent event, `note` is the optional checkout comment
-  or the away location, `manual` is 1 when no card was read - see
-  "Checking in without a card" above. `get_roster_status()` surfaces
-  `manual` for whichever event set the member's current status, in all
-  directions, unlike `note`, which is only shown while out or away; an
-  unverified check-*in* is the half worth flagging). `get_weekly_hours()`
-  computes hours over the last 7 days by opening a span at `in` or `away`
-  (when none is open) and closing it at `out`, counting an unmatched
-  trailing span up to now - see "Three states" above.
-  - Backfilling attendance by hand is `scripts/add-event.py` (name,
-    `in`/`away`/`out`, timestamp; `--note` is the location for `away`), for
-    a reader outage or a missed tap. `/api/manual-toggle` can't
-    do it: it stamps `datetime.now()` and flips whatever the current status is.
-    Because the pairing above is positional, an event inserted into the middle
-    of an existing sequence can silently unpair it, so the script previews the
-    insert against its neighbours and warns about a repeated action, an
-    unmatched trailing `in`, or a note on an `in` (never displayed) before
-    committing.
+  CAC reader thread and Flask request threads both hit the DB. Schema is
+  three tables. `members` is synced from `config/members.json` on every
+  startup via `sync_members_from_config()` — upserts by `edipi_hash`, and
+  sets `active = 0` for anyone no longer listed, which is what takes them off
+  the kiosk and dashboard. It never DELETEs: `presence.member_id` is a
+  foreign key into this table. Re-adding an `edipi_hash` flips `active` back
+  to 1 on the same row rather than creating a second one. A config that
+  parses but lists no members is treated as a bad edit and deactivates
+  nobody — otherwise one stray comma blanks the whole board until someone
+  notices and restarts. `presence` is one row per member, overwritten by
+  every path that changes a status - all of them through `set_status()`,
+  which `toggle_status()` wraps: `status` is one of `ACTIONS` =
+  `'in'`/`'away'`/`'out'` (no row reads as `out`), `note` is the optional
+  checkout comment or the away location, `manual` is 1 when no card was
+  read - see "Checking in without a card" above - and `change_id` is a
+  global counter bumped on each change (see "No time tracking").
+  `get_roster_status()` surfaces `manual` in all directions, unlike `note`,
+  which is only shown while out or away; an unverified check-*in* is the
+  half worth flagging. `meta` is system key/values - just `last_reset` for
+  `reset_if_new_day()`.
   - **Schema changes need a hand-written migration.** `init_db()`'s
     `CREATE TABLE IF NOT EXISTS` is a no-op on existing installs, so adding
-    a column means a `_migrate_*` helper that checks
-    `PRAGMA table_info` and `ALTER TABLE`s if missing — see
-    `_migrate_add_note_column()` and `_migrate_add_manual_column()` for the
-    pattern, `_migrate_allow_away_action()` for a change SQLite can't
-    `ALTER` (a `CHECK` constraint - it rebuilds the table, ids intact), and
+    a column means a `_migrate_*` helper that checks `PRAGMA table_info` and
+    `ALTER TABLE`s if missing. See `_migrate_events_to_presence()` for one
+    that replaces a table outright (it carries each member's last status
+    across, then drops `events` and VACUUMs), and
     `_migrate_hash_edipi_column()` for one that rewrites data as well as
     shape (it renames `edipi` → `edipi_hash` and rehashes in place — in
-    place specifically so `members.id`, and therefore every `events` row
+    place specifically so `members.id`, and therefore the `presence` row
     hanging off it, survives). It must be idempotent; it runs on every
     startup.
-- **Kiosk timestamps** — `fmtTime()` in `main.js` prints just the time for
-  something that happened today, and prepends the date when it didn't, so
-  yesterday's 5:00 PM checkout can't be misread as this evening's by someone
-  walking in the next morning. Two things it depends on. The day is compared
-  with **local** date parts, never an ISO/UTC slice — after ~5pm Mountain the
-  UTC date is already tomorrow, which would stamp a date on every evening
-  checkout. And `renderRoster`'s change-detection key includes today's date,
-  because the board can sit for days with no roster change and would
-  otherwise carry yesterday's date-less rendering straight through midnight,
-  failing in exactly the case the date exists for. That dated form is also
-  what sizes `.roster__status` — it is the longest string the line ever
-  carries, and 1.1rem is the largest that fits it on a six-card strip.
-  `dashboard.js`'s `fmtDateTime()` is separate and always shows the date:
-  it's a log read from a foot away, not a glance from across the room.
 - **Reader indicator** — the dot and label beside the kiosk clock
   (`.board__reader`, `renderReader()` in `main.js`), fed by the `reader`
   field on `/api/state`. Green/quiet when a reader is attached, red "Reader
@@ -721,25 +690,27 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   never animated: it is on screen permanently, so a blinking dot would cost
   the Pi a repaint forever. The page only paints what the server sampled —
   don't move the `readers()` call into the request path.
-- **All times are 24-hour**, on both pages, via `hourCycle: "h23"` in the
-  shared `TIME_OPTS` at the top of each of `main.js` and `dashboard.js`. Use
-  those options for any new timestamp rather than a bare `toLocaleTimeString()`,
-  which reintroduces AM/PM. `h23` is stated outright rather than relying on
+- **The clocks are 24-hour** — the kiosk header clock and the dashboard's
+  "Updated" stamp, the only times either page shows (see "No time
+  tracking") — via `hourCycle: "h23"` in the shared `TIME_OPTS` at the top
+  of each of `main.js` and `dashboard.js`. A bare `toLocaleTimeString()`
+  reintroduces AM/PM. `h23` is stated outright rather than relying on
   `hour12: false`, whose mapping to h23 vs h24 (00:00 vs 24:00 at midnight)
   has varied by locale and ICU version. The locale itself stays the
   browser's. The kiosk's top-right clock carries the weekday and date beside
   the running time; it is still one string compared once a second, so the
   date costs nothing on top of the clock that was already there.
 - **Checkout notes** — an optional "why are you out" comment, threaded
-  through several layers: `record_event()` returns `checkin_event_id`
-  (the new row's id) → `_push_event()` puts it on `_last_event` → the kiosk
-  sees it in `/api/state` and, only for `action === "out"`, shows a text
-  input instead of auto-hiding the toast (15s timeout, arrow keys move
-  between input/Skip/Save for the no-touchscreen kiosk) → `POST
-  /api/events/<id>/note`. `set_event_note()` only updates rows where
-  `action = 'out'`, so a stale/late request can't graft a note onto an
-  unrelated check-in. `get_roster_status()` surfaces `note` only while the
-  member is currently out — it's tied to that checkout, not a profile field.
+  through several layers: `set_status()` returns `change_id` →
+  `_push_event()` puts it on `_last_event` → the kiosk sees it in
+  `/api/state` and, only for `action === "out"`, shows a text input instead
+  of auto-hiding the toast (15s timeout, arrow keys move between
+  input/Skip/Save for the no-touchscreen kiosk) → `POST
+  /api/presence/<change_id>/note`. `set_note()` only updates the row whose
+  `change_id` still matches and whose status is still `out`, so a
+  stale/late request can't graft a note onto a later check-in or away.
+  `get_roster_status()` surfaces `note` only while the member is out or
+  away — it's tied to that status, not a profile field.
 - **`config/members.json`** — hashed EDIPI → display name roster. Written by
   `scripts/add-member.py` (prompts for the EDIPI with `getpass`, so it stays
   out of the file, the terminal and shell history); removing someone is still
@@ -760,7 +731,7 @@ anything on this hardware. If the board ever looks sluggish again, re-check
     `_migrate_hash_edipi_column()` does: `sync_members_from_config()` upserts
     on `edipi_hash`, so editing the roster file alone reads as one member
     leaving and another joining, and leaves the deactivated pending row
-    holding every event logged against it. It updates the DB *before* the
+    holding their current status. It updates the DB *before* the
     JSON, so a refusal leaves the roster unconverted rather than
     half-converted, and prints the equivalent `UPDATE` to run by hand when
     there's no local DB — the usual case, since hashes are made wherever
@@ -777,9 +748,7 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   restarts the rotation from the first slide.
 - **Frontend** (`templates/` + `static/js/`) — no build step, no framework;
   plain JS polling JSON endpoints. Every render function is guarded by a
-  change check (see Performance above; `renderRoster`'s key folds in today's
-  date, because what a timestamp prints depends on it — see Kiosk timestamps
-  below) — the polls are frequent, the data
+  change check (see Performance above) — the polls are frequent, the data
   almost never changes. `main.js` drives the kiosk
   (`templates/index.html`): polls `/api/state` every `POLL_MS` (1.5s) to show
   toast confirmations, the "reading card..." overlay and a parked tap's
@@ -789,7 +758,7 @@ anything on this hardware. If the board ever looks sluggish again, re-check
   only establishes a baseline so a stale event doesn't pop a toast on page
   load, and `0` would make "no baseline" indistinguishable from a real
   first event. `dashboard.js` drives `templates/dashboard.html`: polls
-  `/api/state` + `/api/weekly-hours` + `/api/events` every 5s.
+  `/api/state` every 5s and renders the roster.
   - **Nothing reads the kiosk's browser console** — the Pi boots straight
     into Chromium and runs unattended — so `main.js` posts anything worth
     knowing to `/api/client-log` through `report(key, detail)`, which also
@@ -834,8 +803,8 @@ anything on this hardware. If the board ever looks sluggish again, re-check
 CAC identification here reads the PIV Authentication certificate without a
 PIN — sufficient to identify who tapped (EDIPI is embedded in the cert) but
 not a cryptographic proof of physical key possession the way a PIN-backed
-challenge would be. This is an accepted tradeoff for a small lab attendance
-log, not an oversight — don't "fix" it by adding PIN prompts unless asked.
+challenge would be. This is an accepted tradeoff for a small lab status
+board, not an oversight — don't "fix" it by adding PIN prompts unless asked.
 
 The roster stores hashed EDIPIs (see `identity.py` above), so the ID numbers
 exist only on the cards themselves — not in the config file, the database, or

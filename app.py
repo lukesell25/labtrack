@@ -3,7 +3,6 @@ import logging
 import subprocess
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request
@@ -84,19 +83,19 @@ def _set_reading(active: bool):
         _reader_status["reading"] = active
 
 
-def _push_event(display_name, action, message=None, checkin_event_id=None, manual=False,
+def _push_event(display_name, action, message=None, change_id=None, manual=False,
                 previous=None, location=None):
     """
     Publishes an event for the kiosk to pick up on its next /api/state poll.
     Returns a snapshot of what it published, which is what /api/manual-toggle
-    reports back to its caller.
+    reports back to its caller. In memory only, and carries no time - the
+    toast says who and what, never when.
     """
     with _state_lock:
         _last_event["id"] += 1
         _last_event["event_id"] = _last_event["id"]
         _last_event["display_name"] = display_name
         _last_event["action"] = action
-        _last_event["timestamp"] = datetime.now().isoformat(timespec="seconds")
         # What the event replaced and, for 'away', where they went: the toast
         # reads "Back in lab" rather than "Checked in" off the first, and
         # names the place off the second.
@@ -106,10 +105,12 @@ def _push_event(display_name, action, message=None, checkin_event_id=None, manua
             _last_event["message"] = message
         else:
             _last_event.pop("message", None)
-        if checkin_event_id is not None:
-            _last_event["checkin_event_id"] = checkin_event_id
+        # Which status change this was, so a checkout's optional note can be
+        # attached to it (POST /api/presence/<change_id>/note) and nothing later.
+        if change_id is not None:
+            _last_event["change_id"] = change_id
         else:
-            _last_event.pop("checkin_event_id", None)
+            _last_event.pop("change_id", None)
         # Whether this happened without a card. The toast says so instead of
         # "you may remove your card now", which would be nonsense for a click.
         _last_event["manual"] = bool(manual)
@@ -150,25 +151,19 @@ def _handle_tap(edipi: str):
         _open_tap_choice(member)
         return
 
-    event = db.record_event(member["id"], "in")
-    log.info("%s checked %s at %s", event["display_name"], event["action"], event["timestamp"])
+    # Deliberately not logged: the journal is timestamped and kept for a
+    # month, so a line per check-in would be the timesheet this app no longer
+    # keeps. See "No time tracking" in CLAUDE.md.
+    event = db.set_status(member["id"], "in")
     _set_reading(False)
     _push_event(
         event["display_name"],
         event["action"],
-        checkin_event_id=event["checkin_event_id"],
+        change_id=event["change_id"],
         manual=False,
         previous=event["previous"],
         location=event["location"],
     )
-
-
-def _describe(event):
-    """One journal line's worth of an event: "checked in", "away (server room)"."""
-    if event["action"] == "away":
-        where = f" ({event['location']})" if event["location"] else ""
-        return f"away{where}"
-    return f"checked {event['action']}"
 
 
 # --- the tap question --------------------------------------------------
@@ -201,7 +196,6 @@ def _open_tap_choice(member):
             display_name=member["display_name"],
             deadline=time.monotonic() + TAP_CHOICE_TIMEOUT_S,
         )
-    log.info("%s tapped while in - asking where to", member["display_name"])
     _arm_tap_timeout(tap_id)
 
 
@@ -249,21 +243,15 @@ def _resolve_tap(tap_id, action, location=None, timed_out=False):
     if taken is None:
         return None
     try:
-        event = db.record_event(taken["member_id"], action, location=location)
-    except ValueError as e:
+        event = db.set_status(taken["member_id"], action, location=location)
+    except ValueError:
         # Their status changed under the question (a manual toggle from the
         # dashboard, say) and the answer no longer applies. Nothing to write.
-        log.info("dropping tap choice for %s: %s", taken["display_name"], e)
         return None
-    log.info(
-        "%s %s at %s%s",
-        event["display_name"], _describe(event), event["timestamp"],
-        " (no choice made - recorded a checkout)" if timed_out else "",
-    )
     return _push_event(
         event["display_name"],
         event["action"],
-        checkin_event_id=event["checkin_event_id"],
+        change_id=event["change_id"],
         manual=False,
         previous=event["previous"],
         location=event["location"],
@@ -437,7 +425,7 @@ def kiosk():
 
 @app.route("/dashboard")
 def dashboard():
-    """Viewable from another PC on the network: roster status + hours."""
+    """Viewable from another PC on the network: who is in, away, or out."""
     return render_template("dashboard.html")
 
 
@@ -522,63 +510,17 @@ def api_tap_choice():
     return jsonify(pushed)
 
 
-@app.route("/api/events")
-def api_events():
-    limit = request.args.get("limit", default=50, type=int)
-    return jsonify(db.get_recent_events(limit=limit))
-
-
-@app.route("/api/events/<int:event_id>/note", methods=["POST"])
-def api_set_note(event_id):
+@app.route("/api/presence/<int:change_id>/note", methods=["POST"])
+def api_set_note(change_id):
     """
-    Attaches an optional note to a checkout event - the "why are you out"
-    comment prompt shown on the kiosk right after a checkout tap.
+    Attaches an optional note to a checkout - the "why are you out" comment
+    prompt shown on the kiosk right after one. Keyed on the change_id the
+    kiosk saw in last_event, so a late request can't land on a later status.
     """
     note = (request.json or {}).get("note", "")
-    note = note.strip() if isinstance(note, str) else ""
-    db.set_event_note(event_id, note if note else None)
+    note = note.strip()[:80] if isinstance(note, str) else ""
+    db.set_note(change_id, note if note else None)
     return jsonify({"ok": True})
-
-
-@app.route("/api/events/<int:event_id>", methods=["DELETE"])
-def api_delete_event(event_id):
-    """
-    Remove one event - the dashboard's per-row delete, for a duplicate tap or
-    somebody logged against the wrong name. Everything derived from the log
-    (current status, weekly hours) re-derives from what's left on the next
-    poll, so there is nothing else to update.
-
-    A missing row is a 404 rather than a 500: two people on two dashboards
-    deleting the same row, or a page holding ids from before a clear, is not
-    a server fault.
-    """
-    if not db.delete_event(event_id):
-        return jsonify({"error": "no such event"}), 404
-    return jsonify({"ok": True})
-
-
-@app.route("/api/events/clear", methods=["POST"])
-def api_clear_events():
-    """
-    Empty the attendance log, keeping the roster. db.clear_events() snapshots
-    the database first and reports the backup's name, which is what the
-    dashboard shows afterward - the point of the snapshot is lost if nobody
-    is told it exists.
-
-    The literal "DELETE" in the body is required so this can't be fired by a
-    bare curl (or a mis-click that reaches the endpoint some other way)
-    without saying what it is doing; the dashboard makes the user type it.
-    Note that a request from the Pi itself skips the shared password - same
-    exemption /api/manual-toggle lives with, see webauth.py.
-    """
-    if (request.json or {}).get("confirm") != "DELETE":
-        return jsonify({"error": 'confirm must be "DELETE"'}), 400
-    return jsonify(db.clear_events())
-
-
-@app.route("/api/weekly-hours")
-def api_weekly_hours():
-    return jsonify(db.get_weekly_hours())
 
 
 @app.route("/api/manual-toggle", methods=["POST"])
@@ -593,8 +535,7 @@ def api_manual_toggle():
     what the dev loop and the curl fallback want. Add "action" ("in", "away"
     or "out") to say exactly what to record, and "location" with "away" to say
     where; that is what the kiosk dialog posts. An action that changes
-    nothing ("in" while already in) is a 409, since it would only unpair the
-    hours report.
+    nothing ("in" while already in) is a 409 - the caller's view is stale.
 
     Every event written here is flagged manual, because none of them saw a
     card - the board and the log say so beside the person's name so an
@@ -622,9 +563,9 @@ def api_manual_toggle():
         # record a checkout on top.
         _take_pending_tap(member_id=member_id)
         if action is None:
-            event = db.toggle_checkin(member_id, manual=True)
+            event = db.toggle_status(member_id, manual=True)
         else:
-            event = db.record_event(member_id, action, location=location, manual=True)
+            event = db.set_status(member_id, action, location=location, manual=True)
     except (TypeError, ValueError) as e:
         if action is not None and str(e).startswith("Already"):
             # The page that posted this is showing a stale status - somebody
@@ -633,14 +574,10 @@ def api_manual_toggle():
         # An unknown or non-numeric member_id: a stale kiosk page holding ids
         # from before a roster change, not a server fault, so don't 500 it.
         return jsonify({"error": "unknown member_id"}), 400
-    log.info(
-        "%s %s at %s (no card)",
-        event["display_name"], _describe(event), event["timestamp"],
-    )
     pushed = _push_event(
         event["display_name"],
         event["action"],
-        checkin_event_id=event["checkin_event_id"],
+        change_id=event["change_id"],
         manual=True,
         previous=event["previous"],
         location=event["location"],
@@ -749,7 +686,27 @@ def _init_cac_monitor():
         )
 
 
+def _start_daily_reset():
+    """
+    Everyone in or away goes back to out once per calendar day (see
+    db.reset_if_new_day). Checked at startup and then once a minute, so it
+    lands just after midnight on a Pi that stays up and on the first boot of
+    the day on one that doesn't - and a midday restart changes nothing,
+    because the day it keys on hasn't moved.
+    """
+    def loop():
+        while True:
+            try:
+                db.reset_if_new_day()
+            except Exception:
+                log.exception("daily status reset failed")
+            time.sleep(60)
+
+    threading.Thread(target=loop, name="daily-reset", daemon=True).start()
+
+
 db.init_db()
+_start_daily_reset()
 # Read (and, on a first run, create) the dashboard password at startup, so
 # the file exists and its one-time warning lands at boot rather than
 # whenever the first request from another PC happens to arrive.

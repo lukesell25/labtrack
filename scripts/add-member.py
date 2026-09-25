@@ -16,7 +16,7 @@ someone is still a hand-edit - their display name is right there in the file.
 --pending puts someone on the board before their EDIPI is known, so they can
 check in by clicking their name (see "Checking in without a card"); --replace
 swaps that placeholder for the real hash later, rewriting the member row in
-place so the attendance they built up in the meantime stays theirs.
+place so their current status on the board stays theirs.
 
 Run this on the machine that owns config/roster.key: hashes made with one
 key mean nothing to a copy of the app holding a different one. That is often
@@ -63,8 +63,7 @@ def save_roster(data) -> None:
 def find_by_name(members, name: str):
     """
     One roster entry by display name: exact (case-insensitive) first, then a
-    unique substring match so "sellmayer" works. Same rule as
-    scripts/add-event.py, so the two scripts take names the same way.
+    unique substring match so "sellmayer" works.
     """
     wanted = name.strip().lower()
     exact = [m for m in members if m.get("display_name", "").strip().lower() == wanted]
@@ -81,19 +80,17 @@ def find_by_name(members, name: str):
 def swap_in_database(placeholder: str, edipi_hash: str) -> list[str]:
     """
     Rewrite the pending member's edipi_hash in the database in place, so their
-    members.id - and every events row hanging off it - survives.
+    members.id - and the presence row hanging off it - survives.
 
     Editing only the roster file would not do this. sync_members_from_config()
     upserts on edipi_hash and deactivates anyone the file no longer lists, so
     changing the hash reads as "the pending member left, a different person
     joined": a second row appears, and the original goes inactive still holding
-    the history, which takes it off the board and out of the hours report. If
-    they happened to be checked in on the old row, that 'in' is orphaned too
-    and never pairs.
+    their status, so they drop back to 'out' on the board under the new row.
 
     Returns lines to print. Finding no database here is a normal outcome, not
     a failure - hashes are made on the machine that owns roster.key, which is
-    usually not the Pi the events are logged on.
+    usually not the Pi the board runs on.
     """
     remote_fix = [
         "",
@@ -119,7 +116,7 @@ def swap_in_database(placeholder: str, edipi_hash: str) -> list[str]:
         raise SystemExit(
             f"{database.DB_PATH} already has a member row (id {clash['id']}, "
             f"\"{clash['display_name']}\") with that EDIPI hash. Nothing was changed - "
-            "merging two member rows means moving their events across by hand."
+            "two member rows can't share a card."
         )
 
     row = conn.execute(
@@ -136,7 +133,7 @@ def swap_in_database(placeholder: str, edipi_hash: str) -> list[str]:
     conn.commit()
     return [
         f"Updated member id {row['id']} in {database.DB_PATH} in place - their "
-        "check-ins so far stay attached to them."
+        "current status on the board stays with them."
     ]
 
 
@@ -178,7 +175,7 @@ def add_pending(name: str) -> int:
 
     print(f"Added {name} to {MEMBERS_CONFIG} as pending ({placeholder}).")
     print("They show on the board after a restart and can be checked in by")
-    print("clicking their name, which logs as manual - no card can match them.")
+    print("clicking their name, which shows as NO CARD - no card can match them.")
     print("When their EDIPI arrives, finish the entry with:")
     print(f'  python3 scripts/add-member.py --replace "{name}"')
     print("Restart the app to pick it up:  sudo systemctl restart labtrack")
@@ -194,8 +191,8 @@ def replace_pending(name: str) -> int:
         raise SystemExit(
             f"\"{entry['display_name']}\" already has a real EDIPI hash - this only "
             "converts a pending placeholder. To correct a wrong EDIPI, delete the "
-            "entry and add the person again; they come back on a new member row, so "
-            "check-ins logged under the old one stay with it."
+            "entry and add the person again; they come back on a new member row, "
+            "starting out as 'out'."
         )
 
     edipi_hash = identity.hash_edipi(prompt_edipi())

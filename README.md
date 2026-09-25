@@ -2,10 +2,13 @@
 
 A small Flask app for your Raspberry Pi that:
 - Identifies lab members by tapping their DoD CAC on a USB smart card reader (no PIN)
-- Logs check-in/check-out events to SQLite, plus "away" for someone at work
-  but not in the lab (the server room, a lecture hall)
+- Shows who's in the lab, who's away on campus (the server room, a lecture
+  hall), and who's out (lunch, gone home) - current status only. It is not a
+  timesheet: no check-in times are recorded or shown anywhere, and everyone
+  is reset to out once a day
 - Shows a live status board / screensaver on the Pi's own screen
-- Serves a dashboard viewable from any other PC on the network
+- Serves a read-only "who's here" dashboard viewable from any other PC on
+  the network
 
 ## Developing locally, away from the Pi
 
@@ -44,7 +47,7 @@ Each call toggles that member, so run it twice to exercise both the
 check-in toast and the checkout note prompt. Add `"action"` (`in`, `away` or
 `out`) and, for away, `"location"` to record something specific rather than a
 toggle - `{"member_id": 1, "action": "away", "location": "Server room"}`
-puts them on the board as away. Note that events written this way are
+puts them on the board as away. Note that statuses written this way are
 flagged as manual and show a "No card" mark on the board - that is the real
 behaviour, not a dev-mode artifact, so it is not a pixel-perfect stand-in
 for a tap.
@@ -84,7 +87,6 @@ labtrack/
   scripts/setup.sh          Installs everything below in one go
   scripts/add-member.py     Adds a member without their EDIPI hitting disk
                             (--pending for one you don't have an EDIPI for yet)
-  scripts/add-event.py      Logs a check-in/away/out at a time you name
   scripts/soak-report.sh    Summarises a long unattended run
   scripts/build-loop.sh     Builds the long-playing background video (run on the Pi)
   scripts/set-decode.sh     Switches the kiosk between hardware/software decode
@@ -170,11 +172,9 @@ made-up numbers. Hashes are not portable between the two.
 
 **Adding and removing people.** The file is the source of truth: anyone added
 appears on the board after a restart, and anyone removed disappears from the
-status board and from "Hours this week". Their past check-ins stay in the
-database and keep showing in "Recent activity" — removing someone retires
-them, it doesn't erase the attendance log, and their card stops being
-recognised. Add the same EDIPI back and they return with their history
-intact. The restart logs what changed:
+kiosk and the dashboard and their card stops being recognised. Their member
+row is retired rather than deleted, so adding the same EDIPI back returns
+them on the same row. The restart logs what changed:
 
 ```
 INFO labtrack.db: Roster sync deactivated 1 member(s): Ada Vance
@@ -196,7 +196,7 @@ python3 scripts/add-member.py --pending "Ada Vance"
 That asks for nothing and writes a placeholder where the hash goes
 (`pending-ada-vance`). After a restart Ada is a full member: she appears on
 the kiosk strip and the dashboard, she can be checked in and out by clicking
-her name (see "Checking in without a card" below), and those events are
+her name (see "Checking in without a card" below), and those changes are
 flagged `manual` and marked `NO CARD` exactly like anyone else's click-in. No
 card can ever match her, because a real hash is 32 hex characters and the
 placeholder deliberately isn't one.
@@ -223,14 +223,11 @@ that same row in `labtrack.db` instead of adding a second one.
 **Don't do this swap by editing the file alone.** The roster is keyed on the
 hashed EDIPI, so changing the hash reads as *one person leaving and a
 different one joining*: the restart adds a new row and deactivates the old
-one, which still owns every check-in Ada logged while she was pending. Those
-vanish from the board and from "Hours this week", and if she was checked in at
-the time, that `in` is left with no `out` after it and counts as time in the
-lab up to now.
+one, which keeps her current status - so she drops back to "out" on the board.
 
 ```
-id 1  pending-ada-vance   Ada Vance  active 0   <- owns her events
-id 2  aaaabbbb...         Ada Vance  active 1   <- fresh, empty
+id 1  pending-ada-vance   Ada Vance  active 0   <- owns her status
+id 2  aaaabbbb...         Ada Vance  active 1   <- fresh, out
 ```
 
 **When the key and the database are on different machines.** The hash has to
@@ -600,7 +597,7 @@ lab network could check people in and out.
 **This is a lock on the door, not an encrypted tunnel.** There is no HTTPS
 on this hop, so the password and the page contents cross the network in the
 clear and anyone able to sniff the lab network can read both. That's an
-accepted trade for an attendance board on a trusted LAN. If you need more
+accepted trade for a status board on a trusted LAN. If you need more
 than that, the options in rough order of effort are: an ssh tunnel from the
 viewing PC (`ssh -L 5000:localhost:5000 admin@<pi-ip>`, then browse
 `http://localhost:5000/dashboard` - works today with no server change, but
@@ -615,9 +612,8 @@ would then appear to come from the Pi itself and skip the password entirely
 A member has three states, not two: **in** the lab, **out** (gone home, at
 lunch), and **away** - at work but somewhere else, like the server room or
 a lecture hall. A typical day reads in → away (server room) → in → out
-(lunch) → in → away (lecture hall) → in → out. Away is still working time,
-so "Hours this week" on the dashboard runs from the check-in to the
-check-out straight through it; the board just says where the person went.
+(lunch) → in → away (lecture hall) → in → out. The board just says where
+the person is now - never since when.
 
 **Tapping while in asks a question.** A tap from someone who is out (or
 away) simply checks them in - they are standing at the lab's reader. A tap
@@ -626,8 +622,8 @@ instead of writing anything the board asks: **Check out**, or one of the
 preset places under "Still at work, elsewhere" (**Server room**, **Lecture
 hall**, ...), or **Other...** to type one. Click one with the mouse. If
 nobody chooses within 20 seconds the server records a plain checkout - the
-same thing a tap used to mean - so walking off without answering still logs
-the tap, and it does so even if the kiosk browser has died.
+same thing a tap used to mean - so walking off without answering still
+records the tap, and it does so even if the kiosk browser has died.
 
 The preset places come from `config/locations.json`:
 
@@ -638,8 +634,8 @@ The preset places come from `config/locations.json`:
 ```
 
 Edit the list any time; the kiosk re-reads it within a minute, no restart.
-Wherever they went is shown under the person's name on the board and in the
-Note column of the dashboard's activity log, in blue with a hollow ring so
+Wherever they went is shown under the person's name on the board and the
+dashboard, in blue with a hollow ring so
 "away" is never mistaken for "in" from across the room. Clicking the name of
 someone who is away offers **Back in lab** or **Check out**.
 
@@ -658,23 +654,22 @@ yet - a member can check themselves in or out from the kiosk itself:
    "Stepping away" above); someone away gets **Back in lab** or **Check
    out**. Cancel is always there, the dialog cancels itself after 20
    seconds, and clicking anywhere outside the buttons cancels it too, so a
-   stray click never logs anything by itself.
+   stray click never changes anything by itself.
 
 From there it behaves exactly like a tap: the same confirmation, and the
 same optional "why are you out" note prompt on a checkout.
 
-**Anything logged this way is marked.** The event carries a `manual` flag in
-the database, the kiosk shows an amber `NO CARD` under that person's name
-until their next tap, and the dashboard shows it in both the roster and the
-Note column of the activity log. Nothing verified a card, so nothing
+**Anything set this way is marked.** The status carries a `manual` flag in
+the database, and the kiosk and dashboard show an amber `NO CARD` under that
+person's name until their next tap (or the daily reset). Nothing verified a card, so nothing
 pretends one was read - the whole point of tapping a CAC is that the entry
 means something, and an entry anybody could have clicked has to be legible
 as such.
 
 For a **pending member** - someone on the roster with no EDIPI yet, added
 with `add-member.py --pending` (see "3. Fill in your roster") - this isn't a
-fallback, it's the only way in until their number arrives. Every event they
-log stays marked `NO CARD`; the mark clears on their first real tap once the
+fallback, it's the only way in until their number arrives. Every change they
+make stays marked `NO CARD`; the mark clears on their first real tap once the
 EDIPI is filled in with `--replace`.
 
 A mouse has to be plugged into the Pi for any of this, which is also the
@@ -728,7 +723,7 @@ obviously related:
 
 | Source | Where it comes from | Read it with |
 | --- | --- | --- |
-| App events, errors, tracebacks | `app.py` | `journalctl -u labtrack` |
+| App errors, tracebacks (never who checked in - see "No time tracking" in CLAUDE.md) | `app.py` | `journalctl -u labtrack` |
 | Health heartbeat, once a minute | `health.py` | `journalctl -u labtrack \| grep health` |
 | Errors the kiosk page saw | `report()` in `main.js` → `/api/client-log` | `journalctl -u labtrack \| grep client` |
 | Card reader plugged/unplugged | `start_reader_watch()` in `cac_reader.py` | `journalctl -u labtrack \| grep -i "card reader"` |
@@ -994,9 +989,12 @@ sudo systemctl restart labtrack-reboot.timer
 
 Turn it off with `sudo systemctl disable --now labtrack-reboot.timer`.
 
-A reboot doesn't check anybody out — `events` is append-only, so whoever was
-checked in at midnight is still checked in afterwards and their hours keep
-accruing. That's unchanged by this timer; it's the same as any other restart.
+Separately from the reboot, the app resets everyone to **out** once a day,
+clearing notes and `NO CARD` marks too: with no time on anybody's card, a
+forgotten checkout would otherwise say "In lab" forever. It keys on the date
+rather than on the reboot, so it happens just after midnight whether or not
+the timer is enabled, a Pi that was off overnight still starts the day
+clean, and a restart or self-reboot during the day changes nothing.
 
 ## Day-to-day maintenance
 
@@ -1024,36 +1022,21 @@ accruing. That's unchanged by this timer; it's the same as any other restart.
   add `"action"` - `in`, `away` or `out` - and for away a `"location"`:
   `'{"member_id": 1, "action": "away", "location": "Server room"}'`. An
   action that changes nothing (`in` while already in) is refused with a 409.
-  Either way the event is flagged as manual and shows a "No card" mark on
+  Either way the status is flagged as manual and shows a "No card" mark on
   the board and the dashboard until that person's next tap.
   (member IDs are assigned in the order they appear in `config/members.json`,
   starting at 1 — check `/api/state` to confirm which id maps to whom.)
 - **Add someone before you have their EDIPI**, then fill it in later without
-  losing the attendance they built up in the meantime:
+  splitting them into two member rows:
   ```bash
   python3 scripts/add-member.py --pending "Ada Vance"   # on the board now
   python3 scripts/add-member.py --replace "Ada Vance"   # when the number arrives
   ```
   Until `--replace`, they check in by clicking their name on the kiosk and
-  every event is marked `NO CARD`. `--replace` rewrites their existing member
+  every change is marked `NO CARD`. `--replace` rewrites their existing member
   row rather than adding a second one - see "3. Fill in your roster" above for
-  why hand-editing the hash in `config/members.json` instead splits their
-  history in two. Both need a restart to take effect.
-- **Log someone in/out at a past time** (the reader was down, or they forgot
-  to tap) — `manual-toggle` above always stamps the current time, so use this
-  instead when the time matters:
-  ```bash
-  python3 scripts/add-event.py "Ada Vance" in   "2026-08-27 08:15"
-  python3 scripts/add-event.py "Ada Vance" away "2026-08-27 10:00" --note "Server room"
-  python3 scripts/add-event.py "Ada Vance" in   "2026-08-27 11:30"
-  python3 scripts/add-event.py "Ada Vance" out  "2026-08-27 16:40" --note "left early"
-  ```
-  It takes a name rather than an id (`--list` prints the roster), previews the
-  event against the ones either side of it, and warns before writing if the
-  result would break the in/out pairing the hours report depends on. Add both
-  halves of a shift: a lone `in` (or `away`) counts as time at work up to now.
-  `--note` is the checkout comment for `out` and the location for `away`. No
-  restart needed — the kiosk and dashboard pick it up on their next poll.
+  why hand-editing the hash in `config/members.json` instead splits them in
+  two. Both need a restart to take effect.
 - **Database** lives at `labtrack.db` in the project folder (plain SQLite —
   `sqlite3 labtrack.db` to poke at it directly if needed).
 
@@ -1073,5 +1056,5 @@ Authentication certificate, which is a public object and readable by design.
 This is enough to uniquely identify who tapped (via the EDIPI embedded in
 the cert) but does **not** cryptographically prove the person physically
 possesses the card's private key the way a PIN-backed challenge would. For a
-5-person lab attendance log that's a reasonable tradeoff, but it's worth
+5-person lab status board that's a reasonable tradeoff, but it's worth
 being clear-eyed that this is identification, not full authentication.

@@ -2,8 +2,12 @@
 database.py - SQLite storage for LabTrack.
 
 Everything goes through get_conn(); SQLite handles concurrent access fine at
-this scale (5 users, a handful of events a day) so we don't need anything
+this scale (5 users, a handful of changes a day) so we don't need anything
 heavier than the standard library sqlite3 module.
+
+This is a status board, not a timesheet: it keeps where each member is *now*
+and nothing about when they got there. There is no event log and no
+timestamp on any per-person row - see "No time tracking" in CLAUDE.md.
 """
 
 import json
@@ -11,7 +15,7 @@ import logging
 import re
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+from datetime import date
 from pathlib import Path
 
 import identity
@@ -24,11 +28,10 @@ MEMBERS_CONFIG = Path(__file__).parent / "config" / "members.json"
 # What a pre-hashing members.edipi value looks like, for the migration below.
 _PLAINTEXT_EDIPI = re.compile(r"^\d{10}$")
 
-# The three things an event can say about a member. 'away' is "at work but
-# not in the lab" - the server room, a lecture hall - and sits between the
-# other two: it counts as working time (get_weekly_hours) but not as present
-# (the board shows where they went instead). Where they went is the event's
-# `note`, the same column a checkout comment uses.
+# The three places a member can be. 'away' is "at work but not in the lab" -
+# the server room, a lecture hall - as distinct from 'out' (lunch, gone home).
+# Where they went is the row's `note`, the same column a checkout comment
+# uses, since both are the one line of free text a status carries.
 ACTIONS = ("in", "away", "out")
 
 # sqlite3 connections aren't thread-safe to share across threads by default;
@@ -55,97 +58,82 @@ def init_db():
             active INTEGER NOT NULL DEFAULT 1
         );
 
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            member_id INTEGER NOT NULL REFERENCES members(id),
-            action TEXT NOT NULL CHECK(action IN ('in', 'away', 'out')),
-            timestamp TEXT NOT NULL,
+        -- One row per member who has ever set a status: where they are now,
+        -- and nothing about when. `change_id` is a counter, not a clock - it
+        -- orders the board (most recently changed first) and lets a late
+        -- checkout note find the checkout it belongs to (set_note), without
+        -- recording a time. A member with no row reads as 'out'.
+        CREATE TABLE IF NOT EXISTS presence (
+            member_id INTEGER PRIMARY KEY REFERENCES members(id),
+            status TEXT NOT NULL CHECK(status IN ('in', 'away', 'out')),
             note TEXT,
-            manual INTEGER NOT NULL DEFAULT 0
+            manual INTEGER NOT NULL DEFAULT 0,
+            change_id INTEGER NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_events_member_time
-            ON events(member_id, timestamp);
+        -- System bookkeeping, not per-person data. Holds the date of the last
+        -- daily reset (reset_if_new_day).
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         """
     )
     conn.commit()
-    _migrate_add_note_column()
-    _migrate_add_manual_column()
-    _migrate_allow_away_action()
+    _migrate_events_to_presence()
     _migrate_hash_edipi_column()
     _warn_if_roster_key_lost()
     sync_members_from_config()
 
 
-def _migrate_add_note_column():
+def _migrate_events_to_presence():
     """
-    Existing installs created the events table before the note column
-    existed - CREATE TABLE IF NOT EXISTS above is a no-op on those, so add
-    the column by hand if it's missing. Safe to run every startup.
+    Installs from when this was a timesheet kept an append-only `events` log,
+    every row timestamped. Carry each member's *current* status across into
+    `presence` - the last event's action, its note while out or away, and its
+    manual flag - then drop the log outright, so the times it held are gone
+    rather than merely unread. VACUUM afterwards because DROP TABLE leaves the
+    old pages in the freelist, where the timestamps would otherwise survive in
+    the file.
+
+    change_id is numbered from the old event ids so the board keeps its
+    most-recent-first order across the upgrade. Older installs may lack the
+    note/manual columns; those read as NULL/0. Idempotent - once `events` is
+    gone this returns immediately.
     """
     conn = get_conn()
-    cols = [row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()]
-    if "note" not in cols:
-        conn.execute("ALTER TABLE events ADD COLUMN note TEXT")
-        conn.commit()
-
-
-def _migrate_add_manual_column():
-    """
-    Same pattern as the note column above: installs predating the kiosk's
-    click-to-toggle path have no `manual` flag, and CREATE TABLE IF NOT
-    EXISTS won't add one. Existing rows default to 0 - every event written
-    before this column existed came from a card tap, which is what 0 means.
-    Safe to run every startup.
-    """
-    conn = get_conn()
-    cols = [row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()]
-    if "manual" not in cols:
-        conn.execute("ALTER TABLE events ADD COLUMN manual INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
-
-
-def _migrate_allow_away_action():
-    """
-    Installs predating the 'away' status created events with
-    CHECK(action IN ('in', 'out')), and SQLite cannot alter a CHECK in place -
-    the only way to widen it is to rebuild the table. Copy every row across
-    with its id intact: nothing else references events.id, but the dashboard
-    is holding ids for its delete buttons, and a renumbering under a live page
-    would delete the wrong rows. Runs at import time, before the reader and
-    request threads exist, so nothing is writing while the table is swapped.
-
-    Idempotent: the rebuilt table's SQL names 'away', so a second start skips
-    it. Ordered after the note/manual column migrations, so the copy below can
-    name every column the new table has.
-    """
-    conn = get_conn()
-    sql = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'"
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'"
     ).fetchone()
-    if sql is None or "'away'" in sql["sql"]:
+    if not exists:
         return
-    conn.executescript(
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
+    note = "note" if "note" in cols else "NULL"
+    manual = "manual" if "manual" in cols else "0"
+    last = conn.execute(
+        f"""
+        SELECT e.member_id, e.action, {note} AS note, {manual} AS manual, e.id
+        FROM events e
+        WHERE e.id = (
+            SELECT id FROM events WHERE member_id = e.member_id
+            ORDER BY timestamp DESC, id DESC LIMIT 1
+        )
         """
-        BEGIN;
-        CREATE TABLE events_new (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            member_id INTEGER NOT NULL REFERENCES members(id),
-            action TEXT NOT NULL CHECK(action IN ('in', 'away', 'out')),
-            timestamp TEXT NOT NULL,
-            note TEXT,
-            manual INTEGER NOT NULL DEFAULT 0
-        );
-        INSERT INTO events_new (id, member_id, action, timestamp, note, manual)
-            SELECT id, member_id, action, timestamp, note, manual FROM events;
-        DROP TABLE events;
-        ALTER TABLE events_new RENAME TO events;
-        CREATE INDEX IF NOT EXISTS idx_events_member_time
-            ON events(member_id, timestamp);
-        COMMIT;
-        """
+    ).fetchall()
+    for r in last:
+        conn.execute(
+            "INSERT OR REPLACE INTO presence (member_id, status, note, manual, change_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (r["member_id"], r["action"], r["note"] if r["action"] != "in" else None,
+             1 if r["manual"] else 0, r["id"]),
+        )
+    conn.execute("DROP TABLE events")
+    conn.commit()
+    conn.execute("VACUUM")
+    log.info(
+        "Dropped the old events log; carried %d member status(es) into presence",
+        len(last),
     )
-    log.info("Rebuilt the events table to allow the 'away' action")
 
 
 def _migrate_hash_edipi_column():
@@ -155,8 +143,8 @@ def _migrate_hash_edipi_column():
     in place.
 
     In place rather than rebuilding the table, because that keeps members.id
-    stable - events.member_id is a foreign key into it, so reinserting would
-    either fail or detach the attendance history the table exists to keep.
+    stable - presence.member_id is a foreign key into it, so reinserting would
+    either fail or detach each member's current status from them.
     It also takes the plaintext out of the live database, which is half the
     point of hashing it in the first place. Idempotent (after one pass
     nothing matches _PLAINTEXT_EDIPI), so it is safe on every startup.
@@ -296,12 +284,11 @@ def sync_members_from_config():
     update renamed ones, and deactivate anyone no longer listed. Safe to
     call repeatedly - it runs on every startup.
 
-    Members are deactivated, never deleted. Their events reference members.id
-    with a foreign key, so deleting the row would either fail or orphan the
-    attendance history it exists to preserve; `active = 0` takes them off the
-    board while leaving the log intact. get_roster_status() and
-    get_weekly_hours() both filter on active, so this is all it takes for
-    someone to disappear from the kiosk and the dashboard.
+    Members are deactivated, never deleted. Their presence row references
+    members.id with a foreign key, so deleting the member would fail; and
+    re-adding someone flips the same row back to active rather than creating
+    a second one. get_roster_status() filters on active, so this is all it
+    takes for someone to disappear from the kiosk and the dashboard.
     """
     if not MEMBERS_CONFIG.exists():
         return
@@ -379,48 +366,40 @@ def get_member_by_hash(edipi_hash: str):
     return dict(row) if row else None
 
 
-def _last_event_for_member(conn, member_id: int):
-    return conn.execute(
-        """
-        SELECT * FROM events WHERE member_id = ?
-        ORDER BY timestamp DESC, id DESC LIMIT 1
-        """,
-        (member_id,),
-    ).fetchone()
-
-
 def current_status(member_id: int) -> str:
-    """Returns 'in', 'away' or 'out'. Defaults to 'out' if no events yet."""
+    """Returns 'in', 'away' or 'out'. Defaults to 'out' if never set."""
     conn = get_conn()
-    row = _last_event_for_member(conn, member_id)
-    return row["action"] if row else "out"
+    row = conn.execute(
+        "SELECT status FROM presence WHERE member_id = ?", (member_id,)
+    ).fetchone()
+    return row["status"] if row else "out"
 
 
-def record_event(member_id: int, action: str, location: str | None = None,
-                 manual: bool = False) -> dict:
+def set_status(member_id: int, action: str, location: str | None = None,
+               manual: bool = False) -> dict:
     """
-    Logs one event for a member and returns it as a dict: {member_id,
-    display_name, action, previous, timestamp, checkin_event_id, location,
-    manual}. `previous` is the status this event replaced, which is what lets
-    the kiosk say "Back in lab" rather than "Checked in" for a return from
-    away. checkin_event_id is the events table row id, used to attach an
-    optional note afterward via set_event_note().
+    Sets where a member is and returns what changed as a dict: {member_id,
+    display_name, action, previous, change_id, location, manual}. `previous`
+    is the status this replaced, which is what lets the kiosk say "Back in
+    lab" rather than "Checked in" for a return from away. change_id
+    identifies this change, so the optional checkout note that follows can be
+    attached to it via set_note() and to nothing later.
+
+    Overwrites the member's one presence row - nothing is appended, and no
+    time is recorded.
 
     `location` is where an 'away' member went, stored in the row's `note`
     column - the same column a checkout comment lands in, since both are the
-    one line of free text a status can carry and get_roster_status() shows
-    whichever applies. It is ignored for 'in'.
+    one line of free text a status can carry. It is ignored for 'in'.
 
     manual=True records that no card was involved - the kiosk's click-a-name
-    path and /api/manual-toggle. It is stored per event rather than derived
-    later because nothing else in the row distinguishes the two, and the
+    path and /api/manual-toggle. Nothing else distinguishes the two, and the
     board says so beside the person's name (see get_roster_status).
 
-    Raises ValueError for an unknown member or action, and for an event that
+    Raises ValueError for an unknown member or action, and for a change that
     would say nothing new ('in' while in, 'out' while out): the caller is
-    working from a stale view of the board, and a repeated action would
-    unpair the hours report. 'away' while away is allowed - that is a change
-    of location.
+    working from a stale view of the board. 'away' while away is allowed -
+    that is a change of location.
     """
     if action not in ACTIONS:
         raise ValueError(f"Unknown action {action!r}")
@@ -436,12 +415,14 @@ def record_event(member_id: int, action: str, location: str | None = None,
     location = (location or "").strip() or None
     if action == "in":
         location = None
-    now = datetime.now().isoformat(timespec="seconds")
 
-    cursor = conn.execute(
-        "INSERT INTO events (member_id, action, timestamp, note, manual) "
+    change_id = conn.execute(
+        "SELECT COALESCE(MAX(change_id), 0) + 1 FROM presence"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT OR REPLACE INTO presence (member_id, status, note, manual, change_id) "
         "VALUES (?, ?, ?, ?, ?)",
-        (member_id, action, now, location, 1 if manual else 0),
+        (member_id, action, location, 1 if manual else 0, change_id),
     )
     conn.commit()
 
@@ -450,215 +431,109 @@ def record_event(member_id: int, action: str, location: str | None = None,
         "display_name": member["display_name"],
         "action": action,
         "previous": previous,
-        "timestamp": now,
-        "checkin_event_id": cursor.lastrowid,
+        "change_id": change_id,
         "location": location,
         "manual": bool(manual),
     }
 
 
-def toggle_checkin(member_id: int, manual: bool = False) -> dict:
+def toggle_status(member_id: int, manual: bool = False) -> dict:
     """
     Flips a member between present and not: in -> out, and out *or away* ->
-    in. Returns what record_event() does. This is the no-questions-asked path
+    in. Returns what set_status() does. This is the no-questions-asked path
     (the dev loop's curl, the network fallback); anything that wants to say
-    where someone went calls record_event() with 'away' and a location.
+    where someone went calls set_status() with 'away' and a location.
     """
     action = "out" if current_status(member_id) == "in" else "in"
-    return record_event(member_id, action, manual=manual)
+    return set_status(member_id, action, manual=manual)
 
 
-def set_event_note(event_id: int, note: str | None):
+def set_note(change_id: int, note: str | None):
     """
-    Attaches an optional note to an event - used for the "why are you out"
-    comment a person can add right after checking out. Only applies to
-    'out' events; silently no-ops otherwise so a stray/late request can't
-    graft a note onto an unrelated check-in row.
+    Attaches the optional "why are you out" comment a person can add right
+    after checking out. Keyed on the checkout's change_id and only while that
+    row is still 'out', so a stray or late request can't graft a note onto a
+    later check-in or anyone else's row - it silently no-ops instead.
     """
     conn = get_conn()
     conn.execute(
-        "UPDATE events SET note = ? WHERE id = ? AND action = 'out'",
-        (note, event_id),
+        "UPDATE presence SET note = ? WHERE change_id = ? AND status = 'out'",
+        (note, change_id),
     )
     conn.commit()
 
 
-def delete_event(event_id: int) -> bool:
+def reset_if_new_day() -> int:
     """
-    Remove a single event row - a duplicate tap, or somebody who checked in
-    on the wrong name. Returns False if there was no such row.
+    Once per calendar day, set everyone who is in or away to out. Returns how
+    many were reset (0 when it already ran today).
 
-    The events table is append-only everywhere else in this app for a reason
-    (it *is* the attendance record), so this logs what it removed at WARNING:
-    once the row is gone the journal is the only remaining evidence that it
-    ever existed. Deleting an event re-derives everything computed from the
-    log - the member's current status is whatever event is now most recent,
-    and get_weekly_hours() re-pairs around the hole - so removing one half of
-    an in/out pair leaves the other half unmatched. That is the same
-    positional pairing scripts/add-event.py warns about when inserting.
+    Without timestamps the board can't show that someone's "In lab" is from
+    yesterday, so a forgotten checkout would otherwise stand indefinitely;
+    starting each day with everyone out is what keeps the board honest. Keyed
+    on the date of the last reset in `meta` - one system-wide value, not a
+    per-person time - rather than on process start, so a midday restart or
+    self-reboot leaves statuses alone while a Pi that was off overnight still
+    starts clean. Called at startup and by a once-a-minute thread in app.py.
+
+    Yesterday's notes ("at lunch") and NO CARD marks go too, on everyone -
+    they described a moment that is over. Rows keep their change_id, so the
+    board's order is undisturbed.
+
+    The very first run (no date stored yet - a fresh install, or the upgrade
+    from the old events log) only records today: it must not wipe statuses
+    that were carried across a midday upgrade.
     """
+    today = date.today().isoformat()
     conn = get_conn()
-    row = conn.execute(
-        """
-        SELECT events.action, events.timestamp, members.display_name
-        FROM events JOIN members ON members.id = events.member_id
-        WHERE events.id = ?
-        """,
-        (event_id,),
-    ).fetchone()
-    if row is None:
-        return False
-    conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
-    conn.commit()
-    log.warning(
-        "Deleted event %d: %s %s at %s",
-        event_id, row["display_name"], row["action"], row["timestamp"],
+    row = conn.execute("SELECT value FROM meta WHERE key = 'last_reset'").fetchone()
+    if row and row["value"] == today:
+        return 0
+    count = 0
+    if row:
+        count = conn.execute(
+            "UPDATE presence SET status = 'out', note = NULL, manual = 0 "
+            "WHERE status != 'out' OR note IS NOT NULL OR manual != 0"
+        ).rowcount
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_reset', ?)", (today,)
     )
-    return True
-
-
-def backup_db() -> Path:
-    """
-    Snapshot the database beside itself as labtrack-<stamp>.bak, through
-    sqlite's own backup API rather than a file copy: other threads hold live
-    connections (the CAC reader writes from one), and copying the file out
-    from under an in-flight transaction can capture a torn page plus none of
-    the -wal/-journal that would repair it. The backup API takes a consistent
-    snapshot while they run.
-
-    Backups are gitignored and never pruned automatically - clearing the log
-    is rare and a stale copy is the whole point of having one.
-    """
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = DB_PATH.with_name(f"{DB_PATH.stem}-{stamp}.bak")
-    target = sqlite3.connect(dest)
-    try:
-        get_conn().backup(target)
-    finally:
-        target.close()
-    return dest
-
-
-def clear_events() -> dict:
-    """
-    Empty the attendance log, keeping the roster. Returns how many rows went
-    and the name of the backup taken first.
-
-    Members are deliberately untouched: they are synced from
-    config/members.json, so deleting them here would only have them come
-    straight back on the next startup, and events reference members.id.
-    Wiping the log is enough to reset the board - every member reads as 'out'
-    once nothing is more recent, and weekly hours fall to zero.
-
-    A backup is taken unconditionally rather than offered as an option. This
-    is the one irreversible action in the app, it is a button on a page
-    anyone with the shared password can reach, and the thing it destroys is
-    the record this system exists to keep.
-    """
-    conn = get_conn()
-    count = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-    backup = backup_db()
-    conn.execute("DELETE FROM events")
     conn.commit()
-    log.warning("Cleared %d event(s) from the log - backup saved to %s", count, backup)
-    return {"deleted": count, "backup": backup.name}
+    if count:
+        log.info("Daily reset: cleared %d member status(es)", count)
+    return count
 
 
 def get_roster_status():
-    """All active members with their current status, for the kiosk/dashboard."""
-    conn = get_conn()
-    members = conn.execute(
-        "SELECT * FROM members WHERE active = 1 ORDER BY display_name"
-    ).fetchall()
-    rows = []
-    for m in members:
-        last = _last_event_for_member(conn, m["id"])
-        status = last["action"] if last else "out"
-        rows.append(
-            (
-                last,
-                {
-                    "id": m["id"],
-                    "display_name": m["display_name"],
-                    "status": status,
-                    "since": last["timestamp"] if last else None,
-                    # The note is either a checkout comment or an away location,
-                    # and either way it belongs to that one event, not to the
-                    # person - so it is only surfaced while that event is the
-                    # current one, and never on an 'in'.
-                    "note": last["note"] if (last and status != "in") else None,
-                    # Whether the event that put them in this state was a click
-                    # rather than a tap. Unlike the note, this applies to both
-                    # directions: an unverified check-*in* is the half worth
-                    # flagging, since nobody's card was ever present for it.
-                    "manual": bool(last["manual"]) if last else False,
-                },
-            )
-        )
+    """
+    All active members with their current status, for the kiosk/dashboard.
 
-    # Most recently active member first, so the newest check-in/out lands
-    # leftmost on the board. Timestamps are ISO strings, so they sort
-    # chronologically as text; the event id breaks ties within a second.
-    # Members who have never tapped sort last and, since sort() keeps the
-    # order of equal keys even when reversed, stay alphabetical among
-    # themselves (the SELECT above is ordered by display_name).
-    rows.sort(key=lambda r: (r[0]["timestamp"], r[0]["id"]) if r[0] else ("", 0),
-              reverse=True)
-    return [entry for _, entry in rows]
-
-
-def get_recent_events(limit: int = 50):
+    Most recently changed first, so the newest check-in/out lands leftmost on
+    the board - ordered by change_id, a counter, not a time. Members who have
+    never set a status sort last, alphabetically among themselves.
+    """
     conn = get_conn()
     rows = conn.execute(
         """
-        SELECT events.*, members.display_name
-        FROM events JOIN members ON members.id = events.member_id
-        ORDER BY events.timestamp DESC, events.id DESC
-        LIMIT ?
-        """,
-        (limit,),
+        SELECT m.id, m.display_name, p.status, p.note, p.manual
+        FROM members m LEFT JOIN presence p ON p.member_id = m.id
+        WHERE m.active = 1
+        ORDER BY COALESCE(p.change_id, 0) DESC, m.display_name
+        """
     ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def get_weekly_hours():
-    """
-    Rough hours-at-work per member over the last 7 days. A working span opens
-    at an 'in' and closes at the next 'out'; 'away' is still at work, so it
-    neither opens a new span nor closes the current one - in/away/in/out is
-    one span from the first 'in' to the 'out'. An 'away' with no span open
-    (the window cut through one, or a day that began away) opens one, since
-    the person is at work either way. An unmatched trailing span (still in,
-    or still away) counts up to now.
-    """
-    conn = get_conn()
-    since = (datetime.now() - timedelta(days=7)).isoformat(timespec="seconds")
-    members = conn.execute("SELECT * FROM members WHERE active = 1").fetchall()
-
-    results = {}
-    for m in members:
-        rows = conn.execute(
-            """
-            SELECT action, timestamp FROM events
-            WHERE member_id = ? AND timestamp >= ?
-            ORDER BY timestamp ASC
-            """,
-            (m["id"], since),
-        ).fetchall()
-
-        total = timedelta()
-        span_start = None
-        for r in rows:
-            ts = datetime.fromisoformat(r["timestamp"])
-            if r["action"] in ("in", "away"):
-                if span_start is None:
-                    span_start = ts
-            elif r["action"] == "out" and span_start is not None:
-                total += ts - span_start
-                span_start = None
-        if span_start is not None:
-            total += datetime.now() - span_start
-
-        results[m["display_name"]] = round(total.total_seconds() / 3600, 1)
-
-    return results
+    return [
+        {
+            "id": r["id"],
+            "display_name": r["display_name"],
+            "status": r["status"] or "out",
+            # A checkout comment or an away location; never shown on an 'in'
+            # (set_status already clears it there - this is belt and braces).
+            "note": r["note"] if r["status"] in ("out", "away") else None,
+            # Whether what put them in this state was a click rather than a
+            # tap. Unlike the note, this applies to both directions: an
+            # unverified check-*in* is the half worth flagging, since nobody's
+            # card was ever present for it.
+            "manual": bool(r["manual"]),
+        }
+        for r in rows
+    ]

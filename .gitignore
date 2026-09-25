@@ -19,7 +19,9 @@ config/roster.key
 # on first run; per-Pi, so it never belongs in the repo.
 config/dashboard.key
 
-# Snapshots taken before "clear all events" on the dashboard.
+# Snapshots the old dashboard admin panel took before "clear all events".
+# Nothing creates these any more, but they hold the old timestamped event log
+# - delete any left on the Pi rather than letting them get committed.
 labtrack-*.bak
 
 # Hardware vs software video decode for the kiosk browser. Per-Pi and edited

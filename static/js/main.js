@@ -64,35 +64,16 @@ window.addEventListener("unhandledrejection", (e) => {
   report("unhandled-rejection", String(e.reason));
 });
 
-// 24-hour time everywhere on this board. hourCycle "h23" states the
-// convention outright rather than leaning on hour12:false, whose mapping to
-// h23 vs h24 (00:00 vs 24:00 for midnight) has varied by locale and ICU
-// version; h23 is unambiguous on any of them. The locale stays [] - the
-// browser's own - so this pins the clock convention and nothing else.
+// 24-hour time for the header clock. hourCycle "h23" states the convention
+// outright rather than leaning on hour12:false, whose mapping to h23 vs h24
+// (00:00 vs 24:00 for midnight) has varied by locale and ICU version; h23 is
+// unambiguous on any of them. The locale stays [] - the browser's own - so
+// this pins the clock convention and nothing else. The clock is the only
+// time on this board: nobody's status carries one (see "No time tracking"
+// in CLAUDE.md).
 const TIME_OPTS = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
 const CLOCK_TIME_OPTS = { ...TIME_OPTS, second: "2-digit" };
 const CLOCK_DATE_OPTS = { weekday: "short", month: "short", day: "numeric" };
-const STAMP_DATE_OPTS = { month: "short", day: "numeric" };
-
-// Local calendar day, as a comparable string. Built from the date parts
-// rather than an ISO slice because toISOString() is UTC - after 5pm Mountain
-// that reports tomorrow, which would put a date on every evening checkout.
-function dayKey(d) {
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-}
-
-// Timestamps from today show just the time. Older ones carry their date, so
-// yesterday's 5:00 PM checkout can't be read as "this evening" by someone
-// walking in the next morning. Deliberately a date rather than "yesterday":
-// it stays correct over a weekend or a holiday, and needs no arithmetic to
-// interpret from across the room.
-function fmtTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const time = d.toLocaleTimeString([], TIME_OPTS);
-  if (dayKey(d) === dayKey(new Date())) return time;
-  return `${d.toLocaleDateString([], STAMP_DATE_OPTS)}, ${time}`;
-}
 
 function escapeHtml(str) {
   const div = document.createElement("div");
@@ -138,14 +119,7 @@ function statusClass(status) {
 
 let lastRosterJson = "";
 function renderRoster(roster) {
-  // Today's date is part of the cache key, not just the roster data: what
-  // fmtTime() prints depends on it, so at midnight every "5:00 PM" on the
-  // board has to gain a date. The kiosk can sit for days without the roster
-  // changing, and without this the strip would keep yesterday's date-less
-  // rendering until the next tap - which is precisely the morning-after case
-  // this is for. The key changes once a day and costs a string compare that
-  // was happening anyway.
-  const json = JSON.stringify([dayKey(new Date()), roster]);
+  const json = JSON.stringify(roster);
   if (json === lastRosterJson) return;
   lastRosterJson = json;
 
@@ -162,7 +136,7 @@ function renderRoster(roster) {
       <div class="roster__ring"></div>
       <div class="roster__meta">
         <div class="roster__name">${escapeHtml(m.display_name)}</div>
-        <div class="roster__status">${STATUS_LABELS[m.status] || escapeHtml(m.status)}${m.since ? ' · ' + fmtTime(m.since) : ''}</div>
+        <div class="roster__status">${STATUS_LABELS[m.status] || escapeHtml(m.status)}</div>
         ${rosterNote(m)}
       </div>
     </button>
@@ -212,7 +186,6 @@ function showToast(event) {
   if (event.action === "error") {
     document.getElementById("toast-name").textContent = event.message || "Card not recognized";
     document.getElementById("toast-action").textContent = "";
-    document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
     hint.style.display = "none";
     toast.classList.add("is-error");
     setToastVisible(true);
@@ -226,7 +199,6 @@ function showToast(event) {
   if (event.action === "away" && event.location) actionText = `Away · ${event.location}`;
   document.getElementById("toast-action").textContent = actionText;
   toast.classList.toggle("is-away", event.action === "away");
-  document.getElementById("toast-time").textContent = fmtTime(event.timestamp);
   // "You may remove your card now" is the wrong thing to say to someone who
   // just clicked their own name, and the mark it leaves on the board is worth
   // stating at the moment it is made rather than only afterwards.
@@ -236,7 +208,7 @@ function showToast(event) {
   hint.style.display = "block";
   setToastVisible(true);
 
-  if (event.action === "out" && event.checkin_event_id) {
+  if (event.action === "out" && event.change_id) {
     // Checking out: offer an optional "why" note instead of auto-hiding on
     // the usual short timer - give the person a moment to type something.
     toast.classList.add("is-out");
@@ -255,7 +227,7 @@ function showToast(event) {
       const note = input.value.trim();
       if (note) {
         try {
-          await fetch(`/api/events/${event.checkin_event_id}/note`, {
+          await fetch(`/api/presence/${event.change_id}/note`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ note }),
@@ -309,9 +281,9 @@ function showToast(event) {
 // installed - so it has to work with a mouse and nothing else, hence buttons
 // rather than anything typed. It asks first on purpose: the strip is six
 // large targets along the bottom of a screen that sits in the open all day,
-// and without a confirmation step a single stray click silently logs
-// somebody in or out with only a line in an append-only log to show for it.
-// Every event this writes is flagged manual server-side, and the board says
+// and without a confirmation step a single stray click silently moves
+// somebody in or out with nothing to show who did it.
+// Every change this writes is flagged manual server-side, and the board says
 // "No card" beside that person's name until their next tap.
 //
 // Tap: a card read from someone who is already in. That tap means "leaving"
@@ -483,11 +455,7 @@ async function submitChoice(action, location) {
     if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
   } catch (e) {
     report("choice-failed", e);
-    showToast({
-      action: "error",
-      message: "Could not record that",
-      timestamp: new Date().toISOString(),
-    });
+    showToast({ action: "error", message: "Could not record that" });
     return;
   }
 

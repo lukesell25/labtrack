@@ -1,5 +1,5 @@
 [Unit]
-Description=LabTrack web app (timesheet + status board)
+Description=LabTrack web app (who's-in status board)
 After=network.target pcscd.service
 Wants=pcscd.service
 
